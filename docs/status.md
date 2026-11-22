@@ -11,7 +11,7 @@ verified on Old 3DS. Do not collapse them.
 | M1 — Game compilation | implemented; compiled; linked; tested headlessly | `link-final` builds `m1-test.3dsx`; see below | boots, then faults on DS I/O in M2 territory |
 | M2 - Native boot | in progress; tested headlessly | game's own `NitroMain` loop now runs one tick per V-blank; 18 overlays; the intro is reached and the DS pad is forwarded (START skips the intro) | 3D scenes and display capture are M3/M4 work |
 | M3 — 2D | implemented for the boot and intro scenes; rendering in LOTUS | DS 2D engine on the PICA: logo, copyright, the full intro movie and the Pokémon Black logo captured; `mainloop` 1194, `presents` 597 over 1200 frames; direct-colour affine BGs read 16-bit bitmaps | text/affine/extended BGs, OBJ, windows, blending, brightness, direct-colour bitmaps; 256-colour bitmap BGs and the wide art remain out |
-| M4 — 3D | in progress | the title's 3D scene renders stably: `unowa_g3_frames` 1067, `verts` 4881 at 4092 frames, `mainloop 4056`, no stop | `DISPCAPCNT` capture is not modelled (later title phases that blend the 3D into a BG); the start menu is not reached |
+| M4 — 3D | in progress | the title's 3D scene renders stably: `unowa_g3_frames` 1067, `verts` 4881 at 4092 frames, `mainloop 4056`, no stop; 5618 frames with START reaching demo state 4 | `DISPCAPCNT` capture is not modelled (later title phases); the start menu is blocked on the voice-completion seam (M5 audio) |
 | M5 — Gameplay | not started | | input, scripts, audio, resources, saves |
 | M6 — Widescreen | not started | | 400px, camera/culling, WideArt |
 | M7 — Optimization | not started | | hardware profiling, budgets |
@@ -771,8 +771,19 @@ coloured logo. The scene is stable for thousands of frames.
 `DISPCAPCNT` (`0x04000064`) is still not modelled. The title demo arms it
 in its V-blank task (`STARTMENU_CaptureVblankTask`), and later phases use
 it to blend the 3D into a direct-colour BG; those frames will keep the
-scene's clear colour until the capture exists. The start menu has not been
-reached; the title demo keeps looping.
+scene's clear colour until the capture exists.
+
+The title now responds to START. With LOTUS `buttons` 0x400 the guest's
+`KEYINPUT` reads `0x3F7` and `TitleDemoWork.state` moves 3 -> 4
+(`startmenu.c:1119`), but the demo then waits there for the intro fanfare
+to finish: `PM_VOICE_IsSlotActive(work->fanfareHandle)` stays 1 because
+`NNS_SndWaveOutIsPlaying` never sees its wave-out channel go idle
+(`nns_snd_waveout.c:254-268`, channel bit from `SND_GetChannelStatus`).
+LOTUS reports `audio_samples 0` and `audio_focused false`, so the emulated
+sound clock has nothing to advance against. That is the M5 sound seam, not
+a title bug; the start menu cannot be reached until a voice is allowed to
+finish.
+
 
 
 
