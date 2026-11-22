@@ -68,16 +68,24 @@ PORT_DEFINED = {
 
 
 def symbol_addresses(aletheia):
-    """Map name -> (address, kind) from Aletheia's own symbol headers."""
+    """Map name -> (address, kind, source) from Aletheia's symbol headers.
+
+    `source` is the `src/game/...` file whose header carries the declaration.
+    It names the module that owns the object, which fixes both the bytes to
+    copy and the object's extent: an ARM9-declared object at or above the end
+    of the ARM9 image is BSS, even though an overlay may load over that
+    address range later.
+    """
     result = {}
     root = aletheia / "src" / "game"
     for path in root.rglob("*"):
         if path.suffix not in (".c", ".h"):
             continue
+        source = "src/game/" + path.relative_to(root).as_posix()
         text = path.read_text(encoding="utf-8", errors="replace")
         for match in SYMBOL_RE.finditer(text):
             name, addr, kind = match.group(1), int(match.group(2), 16), match.group(3)
-            result.setdefault(name, (addr, kind))
+            result.setdefault(name, (addr, kind, source))
     return result
 
 
@@ -132,17 +140,37 @@ def function_addresses(aletheia, compiled):
 
 
 def region_images(aletheia):
-    """Return ((base, bytes) regions, arm9_load_address) from the ROM extract."""
+    """Return ((base, bytes) regions, arm9_load_address, modules).
+
+    `modules` maps a module key (`arm9`, `ovNNN`) to
+    (image start, image end, module end, bytes or None). The image end is
+    where BSS begins; the module end is the last byte the module owns
+    (layout.json's bss_end). Bytes are None when the extract has no image for
+    the module (an overlay that was not decompressed, or `twl`, which needs
+    the DSi key).
+    """
     layout = json.loads((aletheia / "build" / "black" / "layout" / "layout.json").read_text())
     extract = aletheia / "extract"
     arm9 = layout["arm9"]
     path = extract / arm9["decompressed_file"]
-    regions = [(arm9["load_address"], path.read_bytes())]
+    image = path.read_bytes()
+    regions = [(arm9["load_address"], image)]
+    modules = {
+        "arm9": (arm9["load_address"], arm9["load_address"] + len(image),
+                 arm9["static"]["bss_end"], image),
+    }
     for overlay in layout["overlays"]:
+        key = "ov%03d" % overlay["id"]
         path = extract / overlay["decompressed_file"]
-        if path.exists():
-            regions.append((overlay["ram_start"], path.read_bytes()))
-    return sorted(regions), arm9["load_address"]
+        data = path.read_bytes() if path.exists() else None
+        if data is not None:
+            regions.append((overlay["ram_start"], data))
+        end = overlay["bss_end"] if overlay.get("bss_size") else (
+            overlay["ram_start"] + len(data) if data is not None else overlay["ram_end"])
+        modules.setdefault(key, (overlay["ram_start"],
+                                 overlay["ram_start"] + (len(data) if data is not None else 0),
+                                 end, data))
+    return sorted(regions), arm9["load_address"], modules
 
 
 def bytes_at(regions, address, length):
@@ -171,16 +199,33 @@ def pointer_target(spans, starts, value):
     return None
 
 
-def generate(undefined, symbols, regions, arm9_base, functions, out_path,
-             reloc_name):
+def module_of(source):
+    """Module key for a `src/game/...` path: arm9 or the overlay directory."""
+    parts = source.split("/")
+    if len(parts) < 4:
+        return None
+    if parts[2] in ("arm9", "arm9_autoload0_ITCM"):
+        return "arm9"
+    return parts[2]
+
+
+def generate(undefined, symbols, regions, arm9_base, modules, functions,
+             out_path, reloc_name):
     """Write C definitions for data symbols found in the ROM images."""
-    all_addresses = sorted(
-        addr for addr, _kind in symbols.values() if addr >= 0x02000000
-    )
     datas = sorted(
-        (addr, name) for name, (addr, kind) in symbols.items()
+        (addr, name, source) for name, (addr, kind, source) in symbols.items()
         if name in undefined and kind == "data" and addr >= 0x02000000
     )
+    # Objects are bounded by the next symbol of the owning module, not by the
+    # next symbol anywhere: overlays load over ARM9 BSS addresses, so a global
+    # address list would let an overlay symbol truncate an ARM9 object.
+    module_addresses = {}
+    for address, _name, source in datas:
+        module = module_of(source)
+        module_addresses.setdefault(module, []).append(address)
+    for addresses in module_addresses.values():
+        addresses.sort()
+
     lines = [
         "/* Generated from the player's own ROM by tools/gen_data_image.py.",
         " * Never edit. Never commit ROM bytes. See docs/status.md. */",
@@ -188,21 +233,35 @@ def generate(undefined, symbols, regions, arm9_base, functions, out_path,
     ]
     written = []
     zero_filled = []
-    rom_arrays = []          # (name, ds address, bytes, region index)
-    for address, name in datas:
-        position = bisect.bisect_right(all_addresses, address)
-        next_addr = (
-            all_addresses[position] if position < len(all_addresses) else address + MAX_BYTES
-        )
+    rom_arrays = []          # (name, ds address, bytes, in_arm9)
+    for address, name, source in datas:
+        module = module_of(source)
+        addresses = module_addresses.get(module, [address])
+        position = bisect.bisect_right(addresses, address)
+        if position < len(addresses):
+            next_addr = addresses[position]
+        elif module in modules:
+            next_addr = modules[module][2]
+        else:
+            next_addr = address + MAX_BYTES
         length = max(MIN_BYTES, min(MAX_BYTES, next_addr - address))
+
+        # Read the bytes from the module that owns the object. An ARM9 object
+        # at or above the end of the ARM9 image is BSS: an overlay that maps
+        # that address later does not own it. 0x0214655C (_PrintJobWork) is
+        # one, and reading overlay bytes there filled the print job with
+        # glyph tiles.
         found = None
-        while length >= MIN_BYTES:
-            found = bytes_at(regions, address, length)
-            if found is not None:
-                break
-            length //= 2
+        info = modules.get(module)
+        if info is not None and info[3] is not None:
+            start, image_end, _end, image = info
+            if start <= address < image_end:
+                data = image[address - start:]
+                probe = min(length, len(data))
+                if probe >= MIN_BYTES:
+                    found = (data[:probe], start)
         if found is not None:
-            data, region = found
+            data, base = found
             rows = [
                 "    " + ", ".join("0x%02X" % byte for byte in data[i:i + 16]) + ","
                 for i in range(0, len(data), 16)
@@ -216,14 +275,13 @@ def generate(undefined, symbols, regions, arm9_base, functions, out_path,
             lines.append("};")
             lines.append("")
             written.append(name)
-            rom_arrays.append((name, address, data, region))
+            rom_arrays.append((name, address, data, base == arm9_base))
             continue
-        # Addresses outside the extracted ROM regions are BSS or runtime
-        # state: they are zero at boot, so a zero array is the faithful
-        # definition. The size is a link-time placeholder; M2 places these
-        # at their real DS addresses and uses their real extents.
+        # BSS or runtime state: zero at boot, so a zero array is the faithful
+        # definition. The size is the gap to the next object of the same
+        # module, capped so one very distant neighbour cannot inflate it.
         lines.append("unsigned char %s[%d] __attribute__((aligned(8))) = {0};"
-                     % (name, MIN_BYTES * 16))
+                     % (name, length))
         lines.append("")
         zero_filled.append(name)
 
@@ -237,16 +295,16 @@ def generate(undefined, symbols, regions, arm9_base, functions, out_path,
     # array base.
     arm9_spans = sorted(
         (addr, addr + len(data), name, addr, len(data))
-        for name, addr, data, region in rom_arrays
-        if regions[region][0] == arm9_base
+        for name, addr, data, in_arm9 in rom_arrays
+        if in_arm9
     )
     arm9_starts = [span[0] for span in arm9_spans]
     relocs = []
     skipped = 0
     fnptrs = []
     fn_unresolved = 0
-    for name, address, data, region in rom_arrays:
-        if regions[region][0] != arm9_base:
+    for name, address, data, in_arm9 in rom_arrays:
+        if not in_arm9:
             continue
         for offset in range((-address) % 4, len(data) - 3, 4):
             value = int.from_bytes(data[offset:offset + 4], "little")
@@ -331,7 +389,7 @@ def generate(undefined, symbols, regions, arm9_base, functions, out_path,
     # would make &symbol the value instead. `.set` would fix that, but 3dsxtool
     # rejects relocations against absolute low addresses, so keep addressable
     # data here and normalise the handle at the GF_OVERLAY_Load boundary (M3).
-    small = sorted(n for n in undefined if 0 < symbols.get(n, (0, ""))[0] < 0x100)
+    small = sorted(n for n in undefined if 0 < symbols.get(n, (0, "", ""))[0] < 0x100)
     if small:
         lines.append("/* Linker-symbol values: read through, do not take the address. */")
         for name in small:
@@ -355,11 +413,11 @@ def main():
 
     undefined = set(args.undefined.read_text().split()) - PORT_DEFINED
     symbols = symbol_addresses(args.aletheia)
-    regions, arm9_base = region_images(args.aletheia)
+    regions, arm9_base, bounds = region_images(args.aletheia)
     compiled = compiled_sources(args.aletheia)
     functions = function_addresses(args.aletheia, compiled)
     written, zero_filled, relocs, skipped, fnptrs = generate(
-        undefined, symbols, regions, arm9_base, functions, args.out,
+        undefined, symbols, regions, arm9_base, bounds, functions, args.out,
         args.reloc_name)
     print("generated %d ROM-backed and %d zero-filled data symbols in %s"
           % (len(written), len(zero_filled), args.out))

@@ -358,19 +358,42 @@ the main thread Ready and its PC frozen at `0x112804`. `PORT_CFLAGS` now passes
 of the compiler's libc substitutions. `-fno-builtin-strlen` alone does not fix
 it, and the same substitution can hit any other builtin the MSL files define.
 
+### BSS extents and module ownership
+
+Zero-filled objects were emitted as a fixed 64-byte placeholder. The BSS
+region holds real objects much larger than that, and the linker packs
+adjacent ones, so a legitimate write to one object overwrote its neighbours.
+`gGlyphExpandTable` (`gf_font.c`) is a `u16[256]` (512 bytes); as a 64-byte
+array it spilled 448 bytes into `gFontState`, `_PrintJobWork` and
+`_pGlyphBmp`, which is why the print job held glyph tiles and `blitGlyph`
+became `0x47040704`.
+
+The generator now derives each object's extent from the next symbol of the
+*same module* (`arm9` or `ovNNN`, from the declaring file), capped at 8 KiB,
+and uses the module's `bss_end` when no later symbol exists. A symbol is only
+read from ROM when its address lies below its own module's image end, so an
+ARM9 object in ARM9 BSS is never copied from an overlay that later maps the
+same address. That changed the image from 6575 ROM-backed + 200 zero-filled to
+5994 + 781 objects; `gGlyphExpandTable` is 512 bytes, `_PrintJobWork` 28,
+`_pGlyphBmp` 4, `gFontFormatInitFuncs` 8.
+
+Aliased names still get separate objects: 260 addresses carry more than one
+name (558 names), for example `sOverlayLaunchWork`/`sOverlayLaunchWorkArg` at
+`0x02146948` and `g_brightnessRecords`/`g_brightnessSub` at `0x021468FC`.
+Writes through one alias are invisible through the other until aliases share
+storage. That is the next data-image defect.
+
 With the function table relocated the earlier `blx r12 = 0x0201DAA5` fault is
-gone. `lotus_run_until(600)` now stops at frame 14 with an unmapped read at
-`0x47040704`, reached from `PRINTSYS_PrintStep` (`printsys.c:897`) through
-`job->blitGlyph` (`PrintCtx+0x18`). The stack below it is
+gone. `lotus_run_until(600)` now stops at frame 16 with an unmapped read at
+`0x341`, reached through `s->ops->isActive()` in `GFL_NET_GetRunState`
+(`net.c:438`), which the shutdown screen calls. The stack below it is
 `APP_POWER_ClearCallback` <- `FLASH_ACCESS_Read(on_error)` <-
 `BACKUP_SYSTEM_ReadFlash` <- `SAVE_OUTSIDE_Load` <- `SAVE_CONTROL_Create` <-
 `GFL_USE_InitGameSystems`, so the shutdown screen is the response to a failed
 save read, not an independent fault. Counters at the stop: `terminate_count`
 0, `present_count` 0, `unowa_overlay_log_count` 7, `unimplemented` 0,
-`pack_result` 0. At `PRINTSYS_RunJob` entry the job is correct
-(`blitGlyph = 0x0010CEA4`, `bmp = 0x00533CC4`, `font = 0x00533CFC`); before the
-first glyph call `_PrintJobWork` and `_pGlyphBmp` hold 4bpp tile data and
-`blitGlyph` is `0x47040704`. The writer of that overwrite is the open question.
+`pack_result` 0. The print-job overwrite is fixed; the network-state read is
+the next failure on the same path.
 
 Kohjoh and sinjoh were audited for reusable work; the decisions and citations
 are in `docs/reuse-audit.md`.
