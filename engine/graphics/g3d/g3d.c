@@ -40,6 +40,11 @@
 #define KJ_DEBUG_NO_JOIN_LIT 0x40u
 
 static const kj_g3_frame *s_frame;
+/* Temporary bottom-screen evidence: 3D draws per target and the batches the
+ * bottom path sees. */
+unsigned int unowa_g3d_top_draws;
+unsigned int unowa_g3d_bottom_draws;
+unsigned int unowa_g3d_bottom_batches;
 /* The remaster's wide view: the top screen shows 1.25x the DS's horizontal
  * field of view (pokeplatinum-3ds's NitroPort_Gx3dSetWideView(320)). */
 static bool s_wide;
@@ -685,6 +690,14 @@ void kj_g3d_draw(const kj_target *target, bool wide, uint8_t stencil_flags, uint
 {
     const kj_g3_frame *f = s_frame;
     s_wide = wide;
+    if (wide) {
+        ++unowa_g3d_top_draws;
+    } else {
+        ++unowa_g3d_bottom_draws;
+        if (f != NULL) {
+            unowa_g3d_bottom_batches += f->batch_count;
+        }
+    }
     if (f == NULL || f->batch_count == 0) {
         return;
     }

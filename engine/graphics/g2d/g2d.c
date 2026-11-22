@@ -61,6 +61,13 @@ unsigned int unowa_direct_nofit;
 unsigned int unowa_direct_norun;
 int unowa_direct_box[4];
 
+/* Temporary bottom-screen evidence: how often engine B is drawn, skipped as
+ * unchanged, and how many OBJ quads it contributes. */
+unsigned int unowa_bottom_calls;
+unsigned int unowa_bottom_skips;
+unsigned int unowa_bottom_draws;
+unsigned int unowa_bottom_obj_quads;
+
 static const uint16_t *pltt_ptr(const kj_ds_memory *mem, int engine, int kind)
 {
     return (const uint16_t *)(mem->pltt + engine * 0x400 + kind * 0x200);
@@ -2009,10 +2016,20 @@ static void screen_draw_impl(int screen, int engine, const kj_frame_input *in,
 
     const uint8_t *io = mem->io + engine * 0x1000;
     const uint32_t dispcnt = r32(io, 0);
+    if (screen == KJ_SCREEN_BOTTOM) {
+        ++unowa_bottom_calls;
+    }
     const uint16_t *pal = pltt_ptr(mem, engine, 0); /* BG then OBJ: 512 colours */
     const uint16_t bldcnt = r16(io, 0x50);
     const uint8_t bd_flags = (uint8_t)(((bldcnt >> 13) & 1) | ((bldcnt & 0x20) && ((bldcnt >> 6) & 3) >= 2 ? 2 : 0));
     const int display_mode = (int)((dispcnt >> 16) & 3u);
+    /* GX_DISPMODE_VRAM_A..D (gx.h:84-87) select a captured bank instead of
+     * the live layers; the capture source is this engine's own graphics
+     * screen (DISPCAPCNT SRCA=0 in the title), so drawing the layers is the
+     * same picture without the pass through VRAM. BW's title uses it to put
+     * the 3D mascot on the lower screen (DISPCNT bits 16-19 = 0xE). */
+    const bool vram_display = display_mode == 2;
+    const int draw_mode = vram_display ? 1 : display_mode;
     const bool forced_blank = (dispcnt & 0x80u) != 0;
     const bool has_3d = engine == 0 && (dispcnt & 8u) && in->g3 != NULL;
     const bool single_span = !in->lines.active;
@@ -2023,7 +2040,7 @@ static void screen_draw_impl(int screen, int engine, const kj_frame_input *in,
     prepared pr;
     bool prepared_ok = false;
     uint64_t t0 = kj_perf_now();
-    if (single_span && display_mode == 1 && !forced_blank) {
+    if (single_span && draw_mode == 1 && !forced_blank) {
         c.y0 = 0;
         c.y1 = 192;
         c.regs = io;
@@ -2035,11 +2052,25 @@ static void screen_draw_impl(int screen, int engine, const kj_frame_input *in,
 #ifndef HGSS_PROFILE_OFF
             ++s_skipped_screens;
 #endif
+            if (screen == KJ_SCREEN_BOTTOM) {
+                ++unowa_bottom_skips;
+            }
             kj_perf_add(KJ_PERF_G2D, kj_perf_now() - t0);
             return;
         }
     }
     memo->drawn = false;
+    if (screen == KJ_SCREEN_BOTTOM) {
+        ++unowa_bottom_draws;
+        if (prepared_ok) {
+            for (int i = 0; i < 9; ++i) {
+                unowa_bottom_obj_quads += pr.obj[i].count;
+            }
+            for (int i = 0; i < 4; ++i) {
+                unowa_bottom_obj_quads += pr.bg[i].count;
+            }
+        }
+    }
 
     kj_gpu_invalidate();
     C3D_FrameDrawOn(target->rt);
@@ -2058,7 +2089,7 @@ static void screen_draw_impl(int screen, int engine, const kj_frame_input *in,
         kj_perf_add(KJ_PERF_G2D, kj_perf_now() - t0);
         return;
     }
-    if (display_mode != 1) {
+    if (draw_mode != 1) {
 #ifndef HGSS_PROFILE_OFF
         ++s_stats.unsupported_modes; /* VRAM / main-memory display: tracked blocker */
 #endif

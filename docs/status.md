@@ -773,6 +773,32 @@ in its V-blank task (`STARTMENU_CaptureVblankTask`), and later phases use
 it to blend the 3D into a direct-colour BG; those frames will keep the
 scene's clear colour until the capture exists.
 
+### The lower screen: `GX_DISPMODE_VRAM_D`
+
+The title's 3D is on the **lower** screen, the same arrangement kohjoh has
+for HGSS's box character. `POWCNT1` bit 15 is 1 = main engine on top: the
+SDK's `GX_Init` sets that bit (`gx.c:24`) and `GX_DISP_SELECT_MAIN_SUB` is
+1 (`gx.h:207-208`), so the port's `NitroPort_EngineAOnTop` is not inverted.
+`STARTMENU_TitleDemoUpdateTimer` calls `BG_SYS_SetLcdSwap(1)` at
+`frameCount == 0x29A` (main on top), and the phase-2 input branch calls
+`SetLcdSwap(0)`: main engine A, with the 3D, moves to the lower screen.
+
+At that point engine A's DISPCNT is `0x1E0918`: bits 16-19 = `0xE`, which
+is `GX_DISPMODE_VRAM_D` (`gx.h:83-91`, `VRAM_A` 2, `VRAM_B` 6, `VRAM_C` 0xA,
+`VRAM_D` 0xE). The screen shows the VRAM bank the title's `DISPCAPCNT`
+fills from the main graphics screen, i.e. the 3D picture. `g2d` treated
+every display mode except `GX_DISPMODE_GRAPHICS` as unsupported and
+cleared the screen, which is why the lower screen was black.
+
+`g2d` now draws the engine's live layers for display mode 2 (VRAM A..D).
+The capture's source is those same layers, so this is the same picture
+without the VRAM round trip; the A+B afterimage blend (`DISPCAPCNT`
+EVA/EVB against a VRAM source) is still not modelled. LOTUS at the title's
+phase 2: `unowa_g3d_bottom_draws` 573 and 56,655 batches over the run, the
+lower screen shows the checkered 3D floor with the Game Freak mark and the
+light burst, no stop at 3652 frames.
+
+
 The title now responds to START. With LOTUS `buttons` 0x400 the guest's
 `KEYINPUT` reads `0x3F7` and `TitleDemoWork.state` moves 3 -> 4
 (`startmenu.c:1119`), but the demo then waits there for the intro fanfare
