@@ -1,0 +1,189 @@
+# Aletheia source files excluded from unowa's game translation units.
+#
+# Paths are relative to $(ALETHEIA_DIR)/src/game. Blank lines and lines
+# starting with '#' are ignored.
+#
+# Evidence: a devkitARM r68 probe compiled all 411 arm9 + arm9_autoload0_ITCM
+# translation units against sinjoh's NitroSDK header tree. 360 compiled; the
+# 51 below did not. Most are NitroSDK / CW-runtime functions that sinjoh's
+# libnitro.a already implements for ARM11 ("expected '(' before void" and
+# "stray '#'" are Metrowerks inline assembly). Compiling the Aletheia copies
+# would duplicate symbols at link time and reintroduce DS-only assembly.
+#
+# See docs/status.md "M1 source closure" for the probe command and results.
+
+# NitroSDK OS / system layer (provided by sinjoh libnitro.a)
+arm9/cp_context.c
+arm9/cw_runtime.c
+arm9/external.c
+arm9/fs_api.c
+arm9/mi_memory.c
+arm9/mi_swap.c
+arm9/mi_uncompress.c
+arm9/os_alarm.c
+arm9/os_cache.c
+arm9/os_clz.c
+arm9/os_context.c
+arm9/os_exception.c
+arm9/os_init.c
+arm9/os_protectionregion.c
+arm9/os_protectionunit.c
+arm9/os_spinlock.c
+arm9/os_system.c
+arm9/os_tcm.c
+arm9/os_terminate_processor.c
+arm9_autoload0_ITCM/os_irqhandler.c
+arm9_autoload0_ITCM/os_reset.c
+arm9_autoload0_ITCM/scfg_proc.c
+
+# NitroSDK math, 3D commands, microphone and ARM7 services (libnitro.a)
+arm9/fx_mtx22.c
+arm9/fx_mtx33.c
+arm9/fx_mtx43.c
+arm9/fx_mtx44.c
+arm9/g3x.c
+arm9/gxasm.c
+arm9/mic.c
+arm9/nns_g2d_font.c
+
+# BIOS/SVC wrappers written in ARM9 assembly (libnitro.a svc.c)
+arm9/svc_cpu_set_fast.c
+arm9/svc_cpu_set.c
+arm9/svc_div.c
+arm9/svc_get_crc16.c
+arm9/svc_halt.c
+arm9/svc_is_mmem_expanded.c
+arm9/svc_soft_reset.c
+arm9/svc_sqrt.c
+arm9/svc_uncompress_huffman_from_device.c
+arm9/svc_uncompress_lz16_from_device.c
+arm9/svc_uncompress_lz8.c
+arm9/svc_uncompress_rl16_from_device.c
+arm9/svc_uncompress_rl8.c
+arm9/svc_unpack_bits.c
+arm9/svc_wait_by_loop.c
+arm9/svc_wait_intr.c
+arm9/svc_wait_vblank_intr.c
+
+# C runtime and crypto helpers written for Metrowerks (libnitro.a)
+arm9/qsort.c
+arm9/rc4s_arm4cw.c
+
+# Need generated .inc data that is not in the pinned Aletheia checkout.
+# crt0.c is the DS C runtime entry; unowa owns the 3DS entry in engine/app.
+arm9/crt0.c
+arm9/sha1.c
+
+# NitroSDK / NitroSystem library code that also compiles under GCC but
+# duplicates symbols in sinjoh's libnitro.a and libnitrosystem.a. The 3DS
+# builds use sinjoh's ARM11 implementations; Gen V-specific fixes to those
+# libraries belong in unowa's own compat layer, not in a second copy of the
+# SDK. Evidence: `ld -r --whole-archive` over libunowa_game.a, libnitro.a
+# and libnitrosystem.a reported multiple definitions in these 107 objects.
+arm9_autoload0_ITCM/mi_dma.c
+arm9_autoload0_ITCM/os_irqhandler.c
+arm9_autoload0_ITCM/os_reset.c
+arm9/card_api.c
+arm9/card_backup.c
+arm9/card_common.c
+arm9/card_pullout.c
+arm9/card_rom.c
+arm9/convert.c
+arm9/crc.c
+arm9/ctrdg.c
+arm9/dgt_sha1.c
+arm9/fs_archive.c
+arm9/fs_file.c
+arm9/fs_overlay.c
+arm9/fs_proc_default.c
+arm9/fs_proc_mem.c
+arm9/fs_proc_rom.c
+arm9/fx_asinacosidx.c
+arm9/fx_atanidx.c
+arm9/fx_cp.c
+arm9/fx_vec.c
+arm9/fx.c
+arm9/g2.c
+arm9/g3_util.c
+arm9/g3imm.c
+arm9/gx_bgcnt.c
+arm9/gx_load2d.c
+arm9/gx_load3d.c
+arm9/gx_vramcnt.c
+arm9/gx.c
+arm9/gxstate.c
+arm9/internal.c
+arm9/math.c
+arm9/mi_dma_card.c
+arm9/mi_dma_gxcommand.c
+arm9/mi_dma.c
+arm9/mi_init.c
+arm9/mi_wram.c
+arm9/nns_fnd_expheap.c
+arm9/nns_fnd_frameheap.c
+arm9/nns_g2d_anim_bank.c
+arm9/nns_g2d_cell_transfer.c
+arm9/nns_g2d_load.c
+arm9/nns_g2d_multi_cell_animation.c
+arm9/nns_g2d_oam_manager.c
+arm9/nns_g2d_renderer_core.c
+arm9/nns_g2d_renderer.c
+arm9/nns_g2d_srt_control.c
+arm9/nns_g3d_anm_calc.c
+arm9/nns_g3d_anm_texpat.c
+arm9/nns_g3d_anm.c
+arm9/nns_g3d_ge.c
+arm9/nns_g3d_glb.c
+arm9/nns_g3d_init.c
+arm9/nns_g3d_mdl.c
+arm9/nns_g3d_res.c
+arm9/nns_g3d_sbc.c
+arm9/nns_g3d_tex.c
+arm9/nns_g3d_util.c
+arm9/nns_gfd_lnk_vram_man.c
+arm9/nns_gfd_vram_manager.c
+arm9/nns_gfd_vram_transfer.c
+arm9/nns_snd_arc.c
+arm9/nns_snd_arcplayer.c
+arm9/nns_snd_fader.c
+arm9/nns_snd_main.c
+arm9/nns_snd_player.c
+arm9/nns_snd_strm.c
+arm9/nns_snd_system.c
+arm9/nns_snd_waveout.c
+arm9/os_alloc.c
+arm9/os_arena.c
+arm9/os_emulator.c
+arm9/os_entropy.c
+arm9/os_interrupt.c
+arm9/os_irqhandler.c
+arm9/os_irqtable.c
+arm9/os_message.c
+arm9/os_mutex.c
+arm9/os_ownerinfo.c
+arm9/os_pxi.c
+arm9/os_reset.c
+arm9/os_thread.c
+arm9/os_tick.c
+arm9/os_timer.c
+arm9/os_valarm.c
+arm9/os_vramexclusive.c
+arm9/pm.c
+arm9/pxi_fifo.c
+arm9/snd_alarm.c
+arm9/snd_bank.c
+arm9/snd_command.c
+arm9/snd_interface.c
+arm9/snd_main.c
+arm9/snd_util.c
+arm9/snd_work.c
+arm9/std_string.c
+arm9/tp.c
+arm9/wm_dcf.c
+arm9/wm_ds.c
+arm9/wm_etc.c
+arm9/wm_ks.c
+arm9/wm_mp.c
+arm9/wm_standard.c
+arm9/wm_sync.c
+arm9/wm_system.c

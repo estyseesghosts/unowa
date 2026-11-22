@@ -1,0 +1,13 @@
+# Build trees: release and profile are always separate.
+build/
+# Local game data is never committed (ROM-derived, saves, captures).
+*.pak
+*.sav
+*.3dsx
+*.elf
+*.smdh
+*.cia
+sd-card/
+# Editor/tool noise
+__pycache__/
+*.pyc

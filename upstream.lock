@@ -1,0 +1,31 @@
+# unowa upstream pins. Update deliberately, never track a moving branch.
+# Format: name url commit  (one per line; '#' comments)
+# Source: UNOWA.md "Baseline repositories, pinned 2026-11-22".
+
+# Game source: complete Gen V game code (no license grant on src/).
+aletheia https://github.com/Project-Holon/aletheia.git 50731dd
+
+# Gen V compatibility reference: parse selectively, do not import wholesale.
+eidos https://github.com/Project-Holon/eidos.git 2319b45
+
+# Native 3DS GPU optimization reference (read, cite, selectively import).
+kohjoh https://github.com/estyseesghosts/kohjoh.git 7a98ace
+
+# Runtime/platform skeleton: frame bridge, G2D/G3D, audio, storage, WideArt.
+sinjoh https://github.com/estyseesghosts/sinjoh.git 1774be6
+
+# Hardware and engineering guidance. Never edit; PR corrections upstream.
+coffeepot https://github.com/estyseesghosts/coffeepot.git 209c8ed
+
+# Toolchain (devkitPro pacman package versions, checked against sinjoh).
+toolchain devkitARM r68-1 gcc-16.1.0 binutils-2.46.0 newlib-4.6.0.20260123-5
+toolchain libctru 2.7.1-1
+toolchain citro3d 1.7.1-2
+toolchain citro2d 1.7.0-1
+toolchain 3dstools 1.3.1-3
+toolchain picasso 2.7.2-3
+toolchain tex3ds 2.3.0-4
+
+# Integration debugger (not a timing authority).
+emulator LOTUS v0.0.2 (windowed, software worker; host config in lotus-data/citnlo/host.json)
+emulator Azahar 2126.2 (integration/debug only, never an O3DS benchmark)
