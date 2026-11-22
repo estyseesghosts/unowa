@@ -361,6 +361,35 @@ def rewrite_main_ram(text, relative, index):
     return text, count
 
 
+SWAP_BUFFERS_WRITE = re.compile(r"\breg_G3_SWAP_BUFFERS\s*=\s*([^;]+);")
+
+
+def rewrite_swap_buffers(text):
+    """Route direct DS geometry-swap writes through the port seam.
+
+    G3D_SYSTEM_SwapBuffersMain stores the packed parameter into
+    reg_G3_SWAP_BUFFERS (g3d_system.c:1194). On the DS that write *is* the
+    swap. The port's geometry engine is a command stream, and its SDK entry
+    point G3_SwapBuffers calls NitroPort_GxDirectWrite (g3imm.h:441); a plain
+    store to the I/O shadow never reaches the engine, so no scene is ever
+    published. Only this register is rewritten; other G3 registers keep their
+    stores.
+    """
+    count = 0
+
+    def replace(match):
+        nonlocal count
+        count += 1
+        return "NitroPort_G3Swap(%s);" % match.group(1).strip()
+
+    text = SWAP_BUFFERS_WRITE.sub(replace, text)
+    if count:
+        text = ("/* port: the DS geometry swap register is a store; route it\n"
+                " * through the same command seam the SDK's G3_SwapBuffers uses. */\n"
+                "extern void NitroPort_G3Swap(unsigned int value);\n") + text
+    return text, count
+
+
 def rewrite_port_regions(text):
     """Redirect DS I/O, palette, VRAM and OAM literals to the port shadows.
 
@@ -568,6 +597,8 @@ def patch_text(text, relative, removed=(), fixups=(), index=None):
         count += main_ram
         text, regions = rewrite_port_regions(text)
         count += regions
+        text, swap = rewrite_swap_buffers(text)
+        count += swap
         if (main_ram or regions) and not shared:
             text = SHARED_DECL + text
     return text, count

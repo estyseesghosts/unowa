@@ -541,6 +541,18 @@ extern unsigned int unowa_pacing_vblanks;
 unsigned int unowa_present_count;
 unsigned int unowa_mainloop_count;  /* diagnostic: NitroMain iterations */
 
+/* Matched sources store the packed swap parameter into the DS geometry
+ * swap register (g3d_system.c:1194). The port's geometry engine is a command
+ * stream; the SDK's G3_SwapBuffers reaches it through
+ * NitroPort_GxDirectWrite (g3imm.h:441). patch_sources.py rewrites the store
+ * to this call so the scene is actually published. G3OP_SWAP_BUFFERS is 0x50
+ * (nitro/gx/g3.h:49). */
+extern void NitroPort_GxDirectWrite(int opcode, unsigned int value);
+void NitroPort_G3Swap(unsigned int value)
+{
+    NitroPort_GxDirectWrite(0x50, value);
+}
+
 /* The DS V-blank counter lives in the shared work area (HW_VBLANK_COUNT_BUF,
  * DS 0x02FFFC3C). The DS ARM7 advances it (NitroSDK os_irqTable.c:168 is
  * SDK_ARM7-only), so on the port nothing does unless the virtual ARM7 here
