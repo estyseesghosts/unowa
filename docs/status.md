@@ -377,11 +377,39 @@ same address. That changed the image from 6575 ROM-backed + 200 zero-filled to
 5994 + 781 objects; `gGlyphExpandTable` is 512 bytes, `_PrintJobWork` 28,
 `_pGlyphBmp` 4, `gFontFormatInitFuncs` 8.
 
-Aliased names still get separate objects: 260 addresses carry more than one
-name (558 names), for example `sOverlayLaunchWork`/`sOverlayLaunchWorkArg` at
+### Aliased names share one object
+
+Aletheia gives some storage more than one name: 274 same-module groups cover
+558 names, for example `sOverlayLaunchWork`/`sOverlayLaunchWorkArg` at
 `0x02146948` and `g_brightnessRecords`/`g_brightnessSub` at `0x021468FC`.
-Writes through one alias are invisible through the other until aliases share
-storage. That is the next data-image defect.
+Each name used to become its own array, so a write through one was invisible
+through the other.
+
+`object_groups()` now emits one object per `(module, address)` and declares the
+other names as `__attribute__((alias("primary")))`. The attribute gives both
+names the same address and the same size, and survives `--gc-sections` (checked
+with a two-object link before using it). The primary name is the semantic one
+where Aletheia has one, so `g_brightnessSub` carries `g_brightnessRecords` and
+`sOverlayLaunchWork` carries `sOverlayLaunchWorkArg`. 161 duplicate arrays are
+gone: 5994 + 781 objects became 5905 + 709.
+
+Aliases are deliberately scoped to one module. The same numeric address in two
+modules is not one object: overlays reuse ARM9 RAM slots and reuse slots among
+themselves, so `0x0214616C` is `pBattleRec` in ARM9 and `d_0214616C` in ov125,
+holding different content at different times. 139 such cross-module groups stay
+separate, as they must.
+
+In `m1-test.elf` both pairs now agree (`nm`):
+
+```
+00e8bc38 B g_brightnessRecords
+00e8bc38 B g_brightnessSub
+00e8bbf0 B sOverlayLaunchWork
+00e8bbf0 B sOverlayLaunchWorkArg
+```
+
+This did not move the frame-16 stop; the net-state read below is a different
+bug.
 
 With the function table relocated the earlier `blx r12 = 0x0201DAA5` fault is
 gone. `lotus_run_until(600)` now stops at frame 16 with an unmapped read at
