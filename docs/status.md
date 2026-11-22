@@ -423,6 +423,43 @@ save read, not an independent fault. Counters at the stop: `terminate_count`
 `pack_result` 0. The print-job overwrite is fixed; the network-state read is
 the next failure on the same path.
 
+Reading that fault exactly: `GFL_NET_GetRunState` compiles to
+
+```
+103234: ldr r0, [r3, #8]        @ gGFLNetMain.session
+103238: cmp r0, #0
+10323c: bxeq lr
+103240: ldr r3, [r0, #832]      @ session->ops
+103244: ldr r3, [r3, #108]      @ ops->isActive
+```
+
+`0x341` is `1 + 0x340`, so the singleton holds the value **1**, not a session
+pointer and not null. Reading the guest confirms it: `gGFLNetMain` is
+`0c 0 1 1` at the stop and all zero at frame 15, so the word is written during
+frame 16, the same frame the shutdown path runs. `0xc` in `baseHeapId` and the
+`1` in `ircParamA` are explained: `GFL_NET_SetupHeaps` stores the new base heap
+id (it is called; an execute breakpoint at `0x102fd0` hits), and `bg_sys.c`
+stores a layer scroll pair through `GFL_NET_SetIrcParams`.
+
+The session field is not explained that way. An execute breakpoint at
+`GFL_NET_StartSession` (`0x103050`) never hits before the stop, and that is
+the only function in ARM9 that stores a pointer to `+8`; `GFL_NET_EndSession`
+stores 0 there and does not run either. So the `1` is a stray store into the
+singleton, not a net-lifecycle write. LOTUS write watchpoints are available
+(`lotus_debug breakpoint_set ... kind:"write"`) but they switch the worker to
+single-instruction dispatch, which makes the window from frame 15 to the fault
+take tens of minutes, so the writer is still unidentified.
+
+The save read itself is the next thing to fix. `CARD_LockBackup`,
+`CARD_IdentifyBackup`, `CARDi_RequestStreamCommand` and `CARD_WaitBackupAsync`
+all resolve into sinjoh's real NitroSDK `card_backup.c` (0x15bbbc..0x15c07c),
+which drives the DS card bus. On 3DS that bus does not exist, so identification
+and the read fail and `FLASH_ACCESS_Read` calls `on_error`. Kohjoh's port
+solves the same problem with a `Platform_StoreSaveFile` bridge in
+`build/forwarder-reference/3ds_port/src/3ds_game_bridge.c`; unowa needs the
+equivalent at the `CARD_*` boundary, or a clean "no save data" answer that does
+not open the shutdown screen.
+
 Kohjoh and sinjoh were audited for reusable work; the decisions and citations
 are in `docs/reuse-audit.md`.
 
