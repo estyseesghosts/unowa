@@ -11,7 +11,7 @@ verified on Old 3DS. Do not collapse them.
 | M1 — Game compilation | implemented; compiled; linked; tested headlessly | `link-final` builds `m1-test.3dsx`; see below | boots, then faults on DS I/O in M2 territory |
 | M2 - Native boot | in progress; tested headlessly | game's own `NitroMain` loop now runs one tick per V-blank; 18 overlays; the intro is reached and the DS pad is forwarded (START skips the intro) | 3D scenes and display capture are M3/M4 work |
 | M3 — 2D | implemented for the boot and intro scenes; rendering in LOTUS | DS 2D engine on the PICA: logo, copyright, the full intro movie and the Pokémon Black logo captured; `mainloop` 1194, `presents` 597 over 1200 frames; direct-colour affine BGs read 16-bit bitmaps | text/affine/extended BGs, OBJ, windows, blending, brightness, direct-colour bitmaps; 256-colour bitmap BGs and the wide art remain out |
-| M4 — 3D | in progress | geometry engine runs and publishes scenes: title `unowa_g3_frames` 467, `verts` 5332, `mainloop 2674` / `presents 1337`, no stop | `DISPCAPCNT` capture is not modelled (the title's 3D is drawn at BG0 but its composition reads BG3, which is black); the start menu is not reached |
+| M4 — 3D | in progress | the title's 3D scene renders stably: `unowa_g3_frames` 1067, `verts` 4881 at 4092 frames, `mainloop 4056`, no stop | `DISPCAPCNT` capture is not modelled (later title phases that blend the 3D into a BG); the start menu is not reached |
 | M5 — Gameplay | not started | | input, scripts, audio, resources, saves |
 | M6 — Widescreen | not started | | 400px, camera/culling, WideArt |
 | M7 — Optimization | not started | | hardware profiling, budgets |
@@ -761,11 +761,19 @@ was ever swapped (`unowa_g3_frames` 0, `s_have_display` 0) although
 `verts` 5332, no stop at 2892 frames, `mainloop 2674` / `presents 1337`,
 and the captured title logo is fully coloured.
 
-The title still shows it over black: the scene is drawn at BG0, but the
-title's own composition expects the 3D to be captured into BG3
-(`DISPCAPCNT`), which is not modelled and reads as black. `DISPCAPCNT`
-(`0x04000064`) is the next M4 item. The start menu itself has not been
+The title then switches to DISPCNT `0x1E0118`: only BG0 is enabled, with the
+3D layer on it. The logo, its background and the black field are all the
+3D scene (the logo is a flat 3D model), so the title's picture is the
+port's geometry output. LOTUS: `unowa_g3_frames` 1067 and `verts` 4881 at
+4092 frames, `mainloop 4056`, no stop; the captures show the fully
+coloured logo. The scene is stable for thousands of frames.
+
+`DISPCAPCNT` (`0x04000064`) is still not modelled. The title demo arms it
+in its V-blank task (`STARTMENU_CaptureVblankTask`), and later phases use
+it to blend the 3D into a direct-colour BG; those frames will keep the
+scene's clear colour until the capture exists. The start menu has not been
 reached; the title demo keeps looping.
+
 
 
 
