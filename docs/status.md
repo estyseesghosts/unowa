@@ -10,8 +10,8 @@ verified on Old 3DS. Do not collapse them.
 | M0 — Bootstrap | implemented, compiled, tested in emulator | see below | native `.3dsx`, release/profile, async SD log, 30 Hz GPU presentation; both screens render the clear colour |
 | M1 — Game compilation | implemented; compiled; linked; tested headlessly | `link-final` builds `m1-test.3dsx`; see below | boots, then faults on DS I/O in M2 territory |
 | M2 - Native boot | in progress; tested headlessly | game's own `NitroMain` loop now runs one tick per V-blank; 17 overlays; intro cutscene reached in LOTUS; clear-frame presentation reaches both screens | game graphics need M3/M4; input forwarding not yet exercised |
-| M3 — 2D | in progress; rendering in LOTUS | DS 2D engine on the PICA: Pokémon Company/Nintendo logo and copyright screens captured; `mainloop` 1194, `presents` 597 over 1200 frames | text/affine BG, OBJ, windows, blending and brightness from sinjoh's g2d; wide art and 3D layer are stubs |
-| M4 — 3D | not started | | geometry commands, model path, PICA renderer |
+| M3 — 2D | implemented for the boot and intro scenes; rendering in LOTUS | DS 2D engine on the PICA: logo, copyright, the full intro movie and the Pokémon Black logo captured; `mainloop` 1194, `presents` 597 over 1200 frames; direct-colour affine BGs read 16-bit bitmaps | text/affine/extended BGs, OBJ, windows, blending, brightness, direct-colour bitmaps; 256-colour bitmap BGs and the wide art remain out |
+| M4 — 3D | in progress | geometry engine and storage wired; title demo's model/texture/animation resources now load (anmTbl relocation fixed); no 3D scene is published yet because the title menu faults first in CLACT | capture (`DISPCAPCNT`) is not modelled; the title menu crash blocks reaching the 3D draw |
 | M5 — Gameplay | not started | | input, scripts, audio, resources, saves |
 | M6 — Widescreen | not started | | 400px, camera/culling, WideArt |
 | M7 — Optimization | not started | | hardware profiling, budgets |
@@ -262,6 +262,14 @@ A strong `NitroPort_OnFrame` in `port_stubs.c` forwards 3DS HID to the DS pad
 and touch registers; sinjoh's weak version is empty and kohjoh's strong one is
 not linked. The final link places the late objects inside `--start-group` so
 `libnitro.a` is rescanned for those references.
+
+**The LOTUS `buttons` mask is not libctru's key order.** It is the JSM/3DS
+button order used by the input presets (`lotus_input_presets`): A=0x001,
+B=0x002, X=0x004, Y=0x008, Up=0x010, Down=0x020, Left=0x040, Right=0x080,
+L=0x100, R=0x200, Start=0x400, Select=0x800. Measured against the guest's
+`KEYINPUT` (`NitroPort_IoReg + 0x130`): 0x001 -> A (0x3FE), 0x008 -> Y
+(`held 0x800`), 0x040 -> Left (`0x3DF`), 0x400 -> Start. Injecting libctru's
+0x008 for START is what made every earlier START test press Y.
 
 Unsupported-service failures are observable too. `NitroPort_Unimplemented`
 writes only to stderr, which LOTUS does not capture. The final link passes
@@ -685,12 +693,52 @@ reading that shadow, so H-blank effects are walked once per frame.
 Verified in LOTUS, secondary session on card `unowa`, asset `unowa-m1`,
 1200 frames with no stop: `unowa_mainloop_count == 1194`,
 `unowa_pacing_vblanks == 1194`, `unowa_present_count == 597`, 18 overlays.
-Captures show the Game Freak/Pokémon Company and Nintendo logo screens, and
-then the copyright screen, drawn on the top screen at the expected 1.25x
-scale; the bottom screen is the game's white/black output, not a port
-placeholder. Later frames are black while DISPCNT is in mode 5
-(`0x40010C05`, BG2/BG3 affine), which is the intro's next scene and is under
-investigation.
+Captures show the Game Freak/Pokémon Company and Nintendo logo screens, the
+copyright screen, and then the whole intro: the comet, the GAME FREAK title,
+the castle bridge with the player character, and the Pokémon Black Version
+logo. All of it is drawn on the top screen at the expected 1.25x scale; the
+bottom screen is the game's own black output.
+
+Two more pieces were needed for the intro, and both are M3 correctness, not
+workarounds:
+
+- **Direct-colour affine BGs.** The intro is not 3D. `CDEMO_MAIN_SetupScreen`
+  calls `GX_SetGraphicsMode(1, 5, 0)` (`ov179/cdemo_main.c:110`) and sets
+  `BG2CNT`/`BG3CNT` to `0x4084`/`0x4884`: mode 5, extended affine, bit 7
+  (bitmap) and bit 2 (direct colour) set. The engine then loads 256x192
+  frames into a 16-bit BGR555 bitmap with `GX_LoadBG2Scr`/`GX_LoadBG3Scr`
+  (`cdemo_scene.c:205-216`). `g2d` rejected every bitmap BG as unsupported;
+  it now draws direct-colour bitmaps: an 8x8 cell is converted into an atlas
+  slot with bit 15 as the alpha test, and the existing per-cell affine quad
+  path places it. The addressing follows NitroSDK `G2_GetBG2ScrPtr`
+  (`gx_bgcnt.c:50-70`, mode 5 with colour mode: base `screen_base * 0x4000`,
+  linear rows of the BG's pixel size) and eidos `hwcompose.c:596-660`,
+  `RAS_DIRECT` on `cnt & 0x84 == 0x84`, bit 15 clear = transparent.
+  256-colour bitmaps (`cnt & 0x80` without bit 2) are still reported as
+  unsupported.
+- **The per-frame quad arena reset.** `kj_gpu_quads_reset()` was missing
+  from the M0 renderer, which never used the arena. Without it the arena
+  filled up after the logo screens and every later allocation failed
+  (`unowa_direct_norun == 2` per frame, 832 cells each), which is why the
+  intro was black even after the bitmap path worked. The renderer now calls
+  it exactly where sinjoh does (`renderer.c:172-173`).
+
+The title demo's model resources now load. Its animation table pointer at
+`objTbl[0].anmTbl` (DS `0x021BD3E4`) was being rewritten to native
+`DWCi_FOCUSlInit`: overlay 16 has a function at the same numeric address and
+the flat generator accepted another overlay's function for a word inside
+the current module's own data window. `resolve_function` now refuses that
+fallback when the value lies in the current module's `[ram_start, bss_end)`,
+so the word is rebased as data (58 words moved from function pointers to
+flat data pointers; `0x021BD4E0` now holds `0xB813E4`, whose table is
+`{1,0},{6,0}`).
+
+The next scene is the title menu: DISPCNT becomes `0x1E0918` (mode 0, 3D on
+BG0), and it faults after about 1940 frames in `CLACT_ApplyActorTransform`
+with an unmapped 32-bit read of `0x020A9FF8`. That is the open M4 blocker;
+the display capture the title demo arms (`DISPCAPCNT`, `0x04000064`) is not
+modelled yet either.
+
 
 
 ### Wireless stubs

@@ -15,6 +15,7 @@
  */
 
 #include "runtime/kj_bridge.h"
+#include "runtime/kj_g3.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -96,7 +97,7 @@ void unowa_frame_input(kj_frame_input *in, uint32_t vblanks, uint32_t game_frame
     in->lines.regs = in->lines.active
                          ? (const uint8_t (*)[192][UNOWA_LINE_REGS])NitroPort_LineRegs.regs
                          : NULL;
-    in->g3 = NULL; /* M4: the geometry engine and its decoded frame */
+    in->g3 = kj_g3_take_frame(); /* NULL until the first 3D swap */
     in->vblank_count = vblanks;
     in->game_frame = game_frame;
     /* POWCNT1 (0x04000304) bit 15: engine A drives the upper screen. */

@@ -406,17 +406,27 @@ def code_area_spans(module, rows, function_starts):
     return merged
 
 
-def resolve_function(value, module_key, functions):
+def resolve_function(value, module_key, functions, window=None):
     """Port symbol for a stored function pointer, or None.
 
     The module's own functions win, then ARM9 (its addresses are unique); an
     address in another overlay's window is accepted only when exactly one
     overlay has a function there.
+
+    A value inside the current module's own [ram_start, bss_end) window is
+    never another overlay's function: overlays share address windows, so the
+    one-overlay fallback would rewrite the module's own data pointer to a
+    same-numbered function of a different overlay. ov088's title animation
+    table at 0x021BD3E4 is exactly that shape (DWCi_FOCUSlInit is at
+    0x021BD3E4 in ov016). The word then belongs to the data pass, which
+    rebases it into this module's image.
     """
     for key in (module_key, "arm9"):
         name = functions.get(key, {}).get(value)
         if name is not None:
             return name
+    if window is not None and window[0] <= value < window[1]:
+        return None
     found = {table[value] for key, table in functions.items()
              if key not in (module_key, "arm9") and value in table}
     if len(found) == 1:
@@ -487,7 +497,8 @@ def build(modules, data_map, rows, functions, statics, native_spans, narrow):
             if value == 0:
                 continue
             if how in ("ptr", "holder"):
-                function = resolve_function(value, module["key"], functions)
+                function = resolve_function(value, module["key"], functions,
+                                            (module["ram_start"], module["bss_end"]))
             else:
                 # Untyped word: only an exact entry of this module or ARM9.
                 # Other overlays' windows overlap, and 6228 ARM9 data words

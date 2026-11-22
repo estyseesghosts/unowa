@@ -51,6 +51,16 @@ enum {
 static kj_palette s_pal[PAL_COUNT];
 static kj_g2d_stats s_stats;
 
+/* Temporary direct-colour BG evidence (M3): calls, emitted cells, and cells
+ * the atlas reported fully transparent. */
+unsigned int unowa_direct_calls;
+unsigned int unowa_direct_cells;
+unsigned int unowa_direct_clear;
+unsigned int unowa_direct_cells_n;
+unsigned int unowa_direct_nofit;
+unsigned int unowa_direct_norun;
+int unowa_direct_box[4];
+
 static const uint16_t *pltt_ptr(const kj_ds_memory *mem, int engine, int kind)
 {
     return (const uint16_t *)(mem->pltt + engine * 0x400 + kind * 0x200);
@@ -348,6 +358,19 @@ static uint32_t affine_bg(const ctx *c, int bg, bool ext16, run *out)
     const int size = ext16 ? (128 << (cnt >> 14)) : (128 << (cnt >> 14));
     const bool wrap = (cnt & 0x2000) != 0;
     const bool bpp8 = true;
+    /* Extended affine BG with bit 7 set: a direct-colour bitmap, 16 bits a
+     * pixel, so there is no map and no character data. Bit 2 selects direct
+     * over 256-colour with the same bit (eidos hwcompose.c:732 chooses
+     * RAS_DIRECT on `cnt & 0x4`). The bitmap base is the screen-base field
+     * in 16 KB units (NitroSDK gx_bgcnt.c G2_GetBG2ScrPtr, GX_BGMODE_5). */
+    const bool direct = ext16 && (cnt & 0x84u) == 0x84u;
+    if (direct) {
+        ++unowa_direct_calls;
+    }
+    uint32_t bitmap_base = ((cnt >> 8) & 31u) * 0x4000u;
+    if (c->engine == 0) {
+        bitmap_base += ((c->dispcnt >> 27) & 7u) * 0x10000u;
+    }
     uint32_t char_base = ((cnt >> 2) & 15u) * 0x4000u;
     uint32_t scr_base = ((cnt >> 8) & 31u) * 0x800u;
     if (c->engine == 0) {
@@ -388,13 +411,26 @@ static uint32_t affine_bg(const ctx *c, int bg, bool ext16, run *out)
         return 0;
     }
     uint32_t n = (uint32_t)((tx1 - tx0 + 1) * (ty1 - ty0 + 1));
+    if (direct) {
+        unowa_direct_cells_n = n;
+        unowa_direct_box[0] = tx0;
+        unowa_direct_box[1] = tx1;
+        unowa_direct_box[2] = ty0;
+        unowa_direct_box[3] = ty1;
+    }
     if (n > 8192u) {
+        if (direct) {
+            ++unowa_direct_nofit;
+        }
 #ifndef HGSS_PROFILE_OFF
         ++s_stats.unsupported_modes;
 #endif
         return 0;
     }
     if (!run_begin(out, n)) {
+        if (direct) {
+            ++unowa_direct_norun;
+        }
         return 0;
     }
     for (int ty = ty0; ty <= ty1; ++ty) {
@@ -404,24 +440,41 @@ static uint32_t affine_bg(const ctx *c, int bg, bool ext16, run *out)
             uint32_t tile;
             bool hf = false, vf = false;
             int pbank = 0;
-            if (ext16) {
-                const uint32_t a = (scr_base + (uint32_t)(mty * tiles + mtx) * 2u) & mask;
-                const uint16_t e = (uint16_t)(c->bg_vram[a] | (c->bg_vram[a + 1] << 8));
-                tile = e & 0x3FFu;
-                hf = (e >> 10) & 1;
-                vf = (e >> 11) & 1;
-                pbank = e >> 12;
+            kj_tile_ref t;
+            if (direct) {
+                /* 16-bit direct-colour bitmap: the cell is 8x8 pixels in a
+                 * linear `size`-wide BGR555 image, not an 8bpp tile. */
+                const uint32_t cell =
+                    (bitmap_base + ((uint32_t)mty * 8u * (uint32_t)size + (uint32_t)mtx * 8u) * 2u) &
+                    mask;
+                t = kj_atlas_direct((uint32_t)(c->engine * 2), c->bg_vram, cell,
+                                    (uint32_t)size * 2u);
             } else {
-                tile = c->bg_vram[(scr_base + (uint32_t)(mty * tiles + mtx)) & mask];
+                if (ext16) {
+                    const uint32_t a = (scr_base + (uint32_t)(mty * tiles + mtx) * 2u) & mask;
+                    const uint16_t e = (uint16_t)(c->bg_vram[a] | (c->bg_vram[a + 1] << 8));
+                    tile = e & 0x3FFu;
+                    hf = (e >> 10) & 1;
+                    vf = (e >> 11) & 1;
+                    pbank = e >> 12;
+                } else {
+                    tile = c->bg_vram[(scr_base + (uint32_t)(mty * tiles + mtx)) & mask];
+                }
+                const uint32_t toff = (char_base + tile * 64u) & mask;
+                uint32_t pal_id;
+                kj_palette *pal = ext ? pal_ext_bg(c->in, c->engine, bg, pbank, &pal_id)
+                                      : pal_256(c->in, c->engine, 0, &pal_id);
+                t = kj_atlas_tile((uint32_t)(c->engine * 2), c->bg_vram + toff, toff, bpp8, pal,
+                                  pal_id);
             }
-            const uint32_t toff = (char_base + tile * 64u) & mask;
-            uint32_t pal_id;
-            kj_palette *pal = ext ? pal_ext_bg(c->in, c->engine, bg, pbank, &pal_id)
-                                  : pal_256(c->in, c->engine, 0, &pal_id);
-            const kj_tile_ref t =
-                kj_atlas_tile((uint32_t)(c->engine * 2), c->bg_vram + toff, toff, bpp8, pal, pal_id);
             if (!t.valid || t.transparent) {
+                if (direct) {
+                    ++unowa_direct_clear;
+                }
                 continue;
+            }
+            if (direct) {
+                ++unowa_direct_cells;
             }
             /* corners in texture space -> screen */
             kj_v2d *v = out->v + out->count * 4u;
@@ -1682,6 +1735,13 @@ static bool objs_retained(const ctx *c, drawable sub[9])
 
 void kj_g2d_begin_frame(void)
 {
+    unowa_direct_calls = 0;
+    unowa_direct_cells = 0;
+    unowa_direct_clear = 0;
+    unowa_direct_cells_n = 0;
+    unowa_direct_nofit = 0;
+    unowa_direct_norun = 0;
+    unowa_direct_box[0] = unowa_direct_box[1] = unowa_direct_box[2] = unowa_direct_box[3] = 0;
     /* Retained quads point at atlas slots: keep them alive before any
      * allocation this frame can evict them. */
     for (int e = 0; e < 2; ++e) {
@@ -1731,8 +1791,13 @@ static void prepare_span(const ctx *c, bool retain, prepared *pr)
         case 5: ext16 = bg >= 2; break;
         default: unsupported = bg >= 2; break;
         }
-        if (ext16 && (r16(c->regs, 0x08 + 2 * bg) & 0x80)) {
-            unsupported = true; /* bitmap BG (256-colour / direct) */
+        if (ext16) {
+            const uint16_t cnt = r16(c->regs, 0x08 + 2 * bg);
+            /* Bit 7 = bitmap, bit 2 = direct colour. A 256-colour bitmap
+             * still has no path; direct colour is drawn by affine_bg. */
+            if ((cnt & 0x80u) != 0 && (cnt & 0x4u) == 0) {
+                unsupported = true;
+            }
         }
         if (unsupported) {
 #ifndef HGSS_PROFILE_OFF

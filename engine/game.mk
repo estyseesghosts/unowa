@@ -63,7 +63,8 @@ TOOLS := $(dir $(lastword $(MAKEFILE_LIST)))../tools
 # proves the frame loop reaches the display; the G2D/PICA game bridge is M3/M4.
 ENGINE_SRCS := engine/graphics/renderer.c engine/diagnostics/log.c \
                engine/graphics/g2d/g2d.c engine/graphics/g2d/wideart_stub.c \
-               engine/graphics/g3d/g3d_stub.c engine/graphics/pica/gpu.c \
+               engine/graphics/g3d/g3d.c engine/graphics/g3d/textures.c \
+               engine/graphics/pica/gpu.c \
                engine/graphics/pica/targets.c engine/graphics/resources/atlas.c \
                engine/runtime/unowa_frame.c \
                engine/storage/paths.c engine/runtime/unowa_edition.c \

@@ -28,14 +28,18 @@
 
 #include "diagnostics/log.h"
 #include "graphics/g2d/g2d.h"
+#include "graphics/g3d/g3d.h"
+#include "graphics/g3d/textures.h"
 #include "graphics/pica/gpu.h"
 #include "graphics/pica/targets.h"
 #include "graphics/resources/atlas.h"
 #include "runtime/kj_bridge.h"
+#include "runtime/kj_g3.h"
 
 #include <3ds.h>
 #include <citro3d.h>
 #include <stddef.h>
+#include <stdlib.h>
 
 #define CMDBUF_BYTES (512 * 1024)
 
@@ -51,6 +55,12 @@ extern int NitroPort_HBlankLinesOnce(void);
 static bool s_ready;
 static uint32_t s_presents;
 
+/* Temporary M4 evidence: what the geometry engine handed the renderer. */
+unsigned int unowa_g3_frames;
+unsigned int unowa_g3_verts;
+unsigned int unowa_g3_batches;
+unsigned int unowa_g3_serial;
+
 bool unowa_renderer_init(void)
 {
     if (!C3D_Init(CMDBUF_BYTES)) {
@@ -64,8 +74,35 @@ bool unowa_renderer_init(void)
         C3D_Fini();
         return false;
     }
+    {
+        /* The geometry engine writes its vertex/index buffers on the game
+         * thread and the PICA reads them; both sets must be GPU-visible
+         * (sinjoh renderer.c:89-100, coffeepot lessons: linearAlloc). */
+        kj_g3_storage st;
+        for (int i = 0; i < 2; ++i) {
+            st.verts[i] = linearAlloc(sizeof(kj_g3_vertex) * KJ_G3_MAX_VERTS);
+            st.indices[i] = linearAlloc(sizeof(uint16_t) * KJ_G3_MAX_INDICES);
+            if (st.verts[i] == NULL || st.indices[i] == NULL) {
+                kj_log("[gpu] out of linear memory for the 3D storage");
+                kj_targets_exit();
+                C3D_Fini();
+                return false;
+            }
+        }
+        kj_g3_init(&st);
+        /* The DS picture is 256x192; the 25% wide clip extension is M6. */
+        kj_g3_set_wide(false);
+        kj_g3_set_capture(true);
+    }
     if (!kj_g2d_init()) {
         kj_log("[g2d] init failed");
+        kj_targets_exit();
+        C3D_Fini();
+        return false;
+    }
+    if (!kj_g3d_init()) {
+        kj_log("[g3d] init failed");
+        kj_g2d_exit();
         kj_targets_exit();
         C3D_Fini();
         return false;
@@ -82,6 +119,7 @@ void unowa_renderer_exit(void)
     if (!s_ready) {
         return;
     }
+    kj_g3d_exit();
     kj_g2d_exit();
     kj_targets_exit();
     C3D_Fini();
@@ -119,10 +157,20 @@ bool unowa_renderer_present(uint32_t top_color, uint32_t bottom_color)
     kj_frame_input in;
     (void)NitroPort_HBlankLinesOnce();
     unowa_frame_input(&in, unowa_pacing_vblanks, s_presents + 1u);
+    if (in.g3 != NULL) {
+        ++unowa_g3_frames;
+        unowa_g3_verts = in.g3->vert_count;
+        unowa_g3_batches = in.g3->batch_count;
+        unowa_g3_serial = in.g3->serial;
+    }
 
     kj_gpu_invalidate();
+    kj_gpu_quads_reset();
     kj_atlas_begin_frame();
     kj_g2d_begin_frame();
+    kj_tex_begin_frame(&in);
+    kj_g3d_set_frame(in.g3);
+    kj_g3_set_capture(true);
 
     /* Engine A is on the screen POWCNT1 says; the other engine is the other
      * screen (the DS can swap them). */

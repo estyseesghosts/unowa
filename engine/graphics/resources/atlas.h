@@ -60,6 +60,13 @@ void kj_palette_check(kj_palette *p);
 kj_tile_ref kj_atlas_tile(uint32_t source_id, const uint8_t *tile, uint32_t offset, bool bpp8,
                           kj_palette *pal, uint32_t pal_id);
 
+/* Look up (and if needed convert) an 8x8 cell of a direct-colour BG bitmap:
+ * 16-bit BGR555 pixels at `vram + offset`, `stride` bytes per row (DS modes
+ * 3-5 with BGxCNT bit 7). Bit 15 of a pixel is its opacity; cleared means
+ * transparent, as the DS shows it. */
+kj_tile_ref kj_atlas_direct(uint32_t source_id, const uint8_t *vram, uint32_t offset,
+                            uint32_t stride);
+
 /* A slot's corners in 1/16-texel units (the 2D vertex texcoord unit), inset
  * by 1/16 texel on every side. Nearest sampling at 1.25x lands at least 0.2
  * texel inside a tile, but float24 texcoords near v = 1.0 can round past the

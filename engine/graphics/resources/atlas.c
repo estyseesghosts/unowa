@@ -28,6 +28,7 @@ typedef struct slot_info {
     uint32_t pal_version;
     uint32_t last_frame;
     uint8_t bytes[64];
+    uint16_t pix[64]; /* direct-colour cells: the 8x8 BGR555 source pixels */
     uint8_t used;
     uint8_t transparent;
     uint8_t bpp8;
@@ -203,6 +204,100 @@ static void convert(uint16_t slot, const uint8_t *tile, bool bpp8, const kj_pale
     ++s_stats.conversions;
 #endif
     kj_perf_count(KJ_COUNT_TILE_CONV, 1);
+}
+
+/* A direct-colour BG cell: 8x8 BGR555 pixels at `offset`, `stride` bytes
+ * between rows (a linear bitmap, DS modes 3-5 with BGxCNT bit 7). Bit 15 is
+ * the pixel's opacity; BGR555 -> RGBA5551 keeps it as the atlas alpha. */
+static uint16_t direct_rgba5551(uint16_t c)
+{
+    return (uint16_t)((((c & 31u) << 11) | (((c >> 5) & 31u) << 6) | (((c >> 10) & 31u) << 1)) |
+                      ((c >> 15) & 1u));
+}
+
+static void direct_convert(uint16_t slot, const uint16_t *cell, slot_info *info)
+{
+    uint16_t *dst = s_texels + (uint32_t)slot * 64u;
+    unsigned any = 0;
+
+    for (unsigned i = 0; i < 64; ++i) {
+        dst[s_morton[i]] = direct_rgba5551(cell[i]);
+        any |= cell[i] & 0x8000u;
+    }
+    memcpy(info->pix, cell, sizeof(info->pix));
+    info->transparent = any == 0;
+#ifndef HGSS_PROFILE_OFF
+    ++s_stats.conversions;
+#endif
+    kj_perf_count(KJ_COUNT_TILE_CONV, 1);
+}
+
+kj_tile_ref kj_atlas_direct(uint32_t source_id, const uint8_t *vram, uint32_t offset,
+                            uint32_t stride)
+{
+    kj_tile_ref ref = { 0, 0, 0 };
+    const uint64_t key = ((uint64_t)source_id << 56) | (1ull << 54) | (uint64_t)offset;
+    uint16_t cell[64];
+    unsigned any = 0;
+    uint32_t i;
+
+    for (unsigned y = 0; y < 8; ++y) {
+        const uint8_t *row = vram + offset + y * stride;
+        for (unsigned x = 0; x < 8; ++x) {
+            const uint16_t c = (uint16_t)(row[2u * x] | (row[2u * x + 1u] << 8));
+            cell[y * 8u + x] = c;
+            any |= c & 0x8000u;
+        }
+    }
+
+#ifndef HGSS_PROFILE_OFF
+    ++s_stats.lookups;
+#endif
+    i = hash_key(key);
+    while (s_table[i] != EMPTY) {
+        slot_info *info = &s_slots[s_table[i]];
+        if (info->key == key) {
+            if (memcmp(info->pix, cell, sizeof(cell)) != 0) {
+                direct_convert(s_table[i], cell, info);
+            }
+            info->last_frame = s_frame;
+            ref.slot = s_table[i];
+            ref.transparent = info->transparent;
+            ref.valid = 1;
+            return ref;
+        }
+        i = (i + 1u) & (TABLE_SIZE - 1u);
+    }
+
+    if (any == 0) {
+        ref.transparent = 1;
+        ref.valid = 1;
+        return ref;
+    }
+
+    const int slot = find_free_slot();
+    if (slot < 0) {
+#ifndef HGSS_PROFILE_OFF
+        ++s_stats.full;
+#endif
+        return ref;
+    }
+    slot_info *info = &s_slots[slot];
+    info->key = key;
+    info->used = 1;
+    info->bpp8 = 2;
+    info->last_frame = s_frame;
+    info->pal_version = 0;
+    direct_convert((uint16_t)slot, cell, info);
+    i = hash_key(key);
+    while (s_table[i] != EMPTY) {
+        i = (i + 1u) & (TABLE_SIZE - 1u);
+    }
+    s_table[i] = (uint16_t)slot;
+    ref.slot = (uint16_t)slot;
+    ref.transparent = info->transparent;
+    ref.valid = 1;
+    return ref;
 }
 
 kj_tile_ref kj_atlas_tile(uint32_t source_id, const uint8_t *tile, uint32_t offset, bool bpp8,
