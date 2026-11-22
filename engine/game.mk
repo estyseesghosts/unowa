@@ -241,7 +241,7 @@ $(OUT)/obj/engine/%.o: engine/%.c
 
 $(OUT)/gen/m1_main.o:
 	@mkdir -p $(dir $@)
-	@printf 'extern void NitroMain(void);\nextern void NitroPort_InitArm7Services(void);\nextern void gfxInitDefault(void);\nextern int unowa_renderer_init(void);\nint main(void) { gfxInitDefault(); if (!unowa_renderer_init()) { return 1; } NitroPort_InitArm7Services(); NitroMain(); return 0; }\n' > $(OUT)/gen/m1_main.c
+	@printf 'typedef unsigned int u32;\ntypedef int BOOL;\nextern void NitroMain(void);\nextern void NitroPort_InitArm7Services(void);\nextern void NitroPort_SetArm7Handler(int tag, void (*handler)(int, u32, BOOL));\nextern void unowa_handle_nvram(int tag, u32 data, BOOL err);\nextern void gfxInitDefault(void);\nextern int unowa_renderer_init(void);\nint main(void) { gfxInitDefault(); if (!unowa_renderer_init()) { return 1; } NitroPort_InitArm7Services(); NitroPort_SetArm7Handler(4, unowa_handle_nvram); NitroMain(); return 0; }\n' > $(OUT)/gen/m1_main.c
 	@$(DEVKITARM)/bin/arm-none-eabi-gcc $(PORT_CFLAGS) -c $(OUT)/gen/m1_main.c -o $@
 
 $(OUT)/m1-test.elf: $(OUT)/gen/m1_main.o $(OUT)/probe-gv-undefined.txt \

@@ -432,6 +432,71 @@ void NitroPort_OnFrame(void)
     unowa_present_count++;
 }
 
+/*
+ * Virtual ARM7 NVRAM service (PXI tag 4). Gen V uses the NVRAM tag for user
+ * settings; sinjoh's Gen IV port_arm7.c:27-33 registers only FS/RTC/PM/TP/
+ * SOUND, so PXI_SendWordByFifo calls NitroPort_Unimplemented and queues no
+ * reply. The game's boot-time NVRAMi_Read then sleeps forever in
+ * NVRAMi_Wait (arm9/nvram.c:230-241). Decode the command words exactly as
+ * NitroSDK's ARM7 NVRAM_AnalyzeCommand (build/NitroSDK/libraries/spi/src/
+ * ARM7/nvram.c:20-90) and answer with a zeroed settings image. This supplies
+ * defaults; a real save-backed NVRAM image is M5 save-flow work.
+ */
+extern int NitroPort_Arm7Reply(int tag, u32 data, BOOL err);
+
+static u16 s_nvram_cmd[6];
+
+void unowa_handle_nvram(int tag, u32 data, BOOL err)
+{
+    unsigned int i;
+    u32 index;
+    u16 command;
+    u32 buf;
+    u32 addr;
+    u32 size;
+
+    (void)tag;
+    if (err) {
+        return;
+    }
+    if (data & 0x02000000u) {
+        for (i = 0; i < 6; i++) {
+            s_nvram_cmd[i] = 0;
+        }
+    }
+    index = (data & 0x000F0000u) >> 16;
+    if (index >= 6) {
+        return;
+    }
+    s_nvram_cmd[index] = (u16)(data & 0xFFFFu);
+    if (!(data & 0x01000000u)) {
+        return;
+    }
+
+    command = (u16)((s_nvram_cmd[0] & 0xFF00u) >> 8);
+    switch (command) {
+    case 0x22: /* RDSR: status register -> destination word */
+        buf = ((u32)(s_nvram_cmd[0] & 0xFFu) << 24) | ((u32)s_nvram_cmd[1] << 8) |
+              ((u32)(s_nvram_cmd[2] & 0xFF00u) >> 8);
+        if (buf != 0) {
+            *(volatile unsigned char *)buf = 0; /* ready, write disabled */
+        }
+        break;
+    case 0x23: /* READ: address, size, destination */
+        addr = ((u32)(s_nvram_cmd[0] & 0xFFu) << 16) | s_nvram_cmd[1];
+        size = ((u32)s_nvram_cmd[2] << 16) | s_nvram_cmd[3];
+        buf = ((u32)s_nvram_cmd[4] << 16) | s_nvram_cmd[5];
+        (void)addr;
+        if (buf != 0 && size != 0 && size < 0x10000u) {
+            memset((void *)buf, 0, size);
+        }
+        break;
+    default: /* WREN/WRDI/PW/SR: no payload; acknowledge */
+        break;
+    }
+    (void)NitroPort_Arm7Reply(4, 0, 0);
+}
+
 /* DS ROM read-protection check (fs_proc_rom.h:10); unowa reads from SD. */
 int FSi_IsUnreadableRomOffset(void *arc, u32 offset)
 {
