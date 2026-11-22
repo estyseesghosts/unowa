@@ -2,9 +2,6 @@
 # Selected because they define symbols the game needs that sinjoh Gen IV libs lack.
 arm9/ctrdg.c
 arm9/dgt_sha1.c
-arm9/fs_archive.c
-arm9/fs_file.c
-arm9/fs_proc_default.c
 arm9/g2.c
 arm9/mi_dma.c
 arm9/mi_dma_gxcommand.c

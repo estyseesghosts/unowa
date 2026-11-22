@@ -47,6 +47,16 @@ PORT_FIXUPS = {
          "    NitroPort_Log(\"[unowa] overlay load %d\", (int)handle);\n"
          "    unowa_log_overlay((int)handle);\n", 1),
     ],
+    # Aletheia records ov020_id as the absolute DS value 0x14
+    # (src/matched/ov/ov010_func_0215FA00.c:13) and the only two uses are in
+    # this file. GNU ld relocates `(uptr)ov020_id` with R_ARM_ABS32 against
+    # that ABS symbol; 3dsxtool refuses an absolute target below the 3DSX
+    # image base ("Relocation to invalid address"), so inline the constant.
+    "ov020_id_constant": [
+        ("extern unsigned char ov020_id[];",
+         "#define ov020_id 0x14  /* port: absolute DS symbol, see port_stubs.c */",
+         1),
+    ],
     # sinjoh emulates DS interrupts by calling handlers directly, never by
     # entering ARM IRQ mode, so the DS's mode-gated FIFO drain in PMi_WaitBusy
     # cannot run. Drain the reply queue on every iteration instead.

@@ -295,23 +295,82 @@ offset) pairs that rewrites each stored *data* pointer to the emitted array that
 holds the bytes it names. It runs in `main()` before `NitroMain()`.
 
 The pass covers the ARM9 static region only, whose addresses are unique. The
-generated image reports 292 relocations (235 of them `_ArcPathTable`) and 895
-skipped words, which are Thumb/ARM code pointers (bit 0 set, or no data target)
-and are deliberately left alone: function-pointer relocation needs a DS address
-to compiled-symbol map. Overlay-internal pointers are also untouched, because
-237 overlays share 58 load slots and cannot be disambiguated until the overlay
-packaging work. Verified in LOTUS: `_ArcPathTable[0]` reads `PIo2 + 0x708` at
-runtime, exactly `0x020A6BC0 - 0x020A64B8`, and the boot no longer stops on the
+generated image reports 302 relocations (235 of them `_ArcPathTable`) and 288
+skipped words. Overlay-internal pointers are untouched, because 237 overlays
+share 58 load slots and cannot be disambiguated until the overlay packaging
+work. Verified in LOTUS: `_ArcPathTable[0]` reads `PIo2 + 0x708` at runtime,
+exactly `0x020A6BC0 - 0x020A64B8`, and the boot no longer stops on the
 `0x020A6BB0` unmapped read.
 
-Result: `lotus_run_until` reaches 1200 frames with `last_error` empty, four
-live guest threads, and `unowa_overlay_log_count == 6`. The log records the
-`GF_OVERLAY_Load` calls reached during boot. Those handles are the *addresses*
-of the `const unsigned int ov*_id` data variables rather than the small
-numeric IDs, because `.set` absolute symbols make `3dsxtool` reject the image
-(`Relocation to invalid address`). Normalising the handle at the overlay
-boundary is M3 work. The HID hook is linked but not exercised: the guest is
-still in startup with threads blocked on 3DS synchronisation objects.
+The scan now advances by four bytes from the first DS-aligned address in each
+object (`(-address) % 4`) instead of from the array base. 254 of the emitted
+objects start at a non-multiple of four, and a pointer inside one of them does
+not sit at a multiple of four from the array base; the earlier stride missed
+those (292 -> 302 relocations).
+
+### Function-pointer relocation
+
+A ROM pointer table names code, not data. `gFontFormatInitFuncs`
+(`0x0209E73C`, used at `gf_font.c:356`) holds the Thumb addresses
+`0x0201DAA5` and `0x0201DA25`, and `GF_FONT_SetFormat` calls through it with
+`blx r12`. Emitted verbatim, the guest branched to an unmapped DS address; and
+because only that data word referenced the handlers, `--gc-sections` had
+dropped `GF_FONT_InitStreamedGlyphs`, `GF_FONT_InitPreloadedGlyphs`,
+`GF_FONT_ExitStreamedGlyphs` and `GF_FONT_FreeGlyphData` from the image.
+
+Each relocation pass now also rewrites a 4-byte word that equals a function
+start in Aletheia's `layout/function_addrs.tsv`, when the row is ARM9-region,
+non-static, and declared in a file the port compiles
+(`engine/game_blocklist.txt`, `game_overlay_blocklist.txt`). The value written
+is the *port* symbol address, so the ISA bit follows how the port built the
+function (ARM here) rather than the DS row; that is what `blx` must receive.
+The reference also keeps the function through `--gc-sections`.
+
+Verified: the image resolves 401 function pointers (4 more in the Gen V pass).
+`gFontFormatInitFuncs` in guest RAM reads `001229C0 00122918` =
+`GF_FONT_InitStreamedGlyphs`, `GF_FONT_InitPreloadedGlyphs`;
+`gFontFormatExitFuncs` reads `GF_FONT_ExitStreamedGlyphs`,
+`GF_FONT_FreeGlyphData`; all four are `T` in `m1-test.elf`. As an independent
+check, 325 of the 401 words land in objects that `layout/data_objects.json`
+already types as a pointer field or `pointer_table`. The other 80 are in early
+`.data` the object map does not cover, and every one belongs to a run of two or
+more pointers (mostly the `_ExtraSaveDescs` GetSize/Init pairs); no isolated
+heuristic-only hit exists outside those descriptor tables.
+
+One absolute symbol could not stay a `.set`. `ov020_id` is the constant `0x14`
+(`src/matched/ov/ov010_func_0215FA00.c:13`); GNU ld relocates
+`(uptr)ov020_id` with `R_ARM_ABS32` against the ABS symbol and 3dsxtool
+refuses an absolute target below the image base ("Relocation to invalid
+address"). `tools/patch_sources.py` inlines that one constant in
+`ov010/event_wifi_proc.c`. The other `ov*_id` symbols remain addressable data
+variables, so their uses pass a port-side handle that `GF_OVERLAY_Load` must
+normalise (M3).
+
+### Compiler builtin substitution
+
+The game archive compiles Aletheia's MSL runtime, including
+`arm9/msl_string_str.c`, which defines `strlen`. devkitARM GCC 16 recognises the
+definition as the `strlen` builtin and replaces its body with a call to
+`strlen`; `-O2` tail-calls it, so the linked function is a single `b .`
+infinite loop. `GF_STANDARD_GetStringLength` calls it, and the boot hung with
+the main thread Ready and its PC frozen at `0x112804`. `PORT_CFLAGS` now passes
+`-fno-builtin`: a decompiled runtime must keep its own implementations instead
+of the compiler's libc substitutions. `-fno-builtin-strlen` alone does not fix
+it, and the same substitution can hit any other builtin the MSL files define.
+
+With the function table relocated the earlier `blx r12 = 0x0201DAA5` fault is
+gone. `lotus_run_until(600)` now stops at frame 14 with an unmapped read at
+`0x47040704`, reached from `PRINTSYS_PrintStep` (`printsys.c:897`) through
+`job->blitGlyph` (`PrintCtx+0x18`). The stack below it is
+`APP_POWER_ClearCallback` <- `FLASH_ACCESS_Read(on_error)` <-
+`BACKUP_SYSTEM_ReadFlash` <- `SAVE_OUTSIDE_Load` <- `SAVE_CONTROL_Create` <-
+`GFL_USE_InitGameSystems`, so the shutdown screen is the response to a failed
+save read, not an independent fault. Counters at the stop: `terminate_count`
+0, `present_count` 0, `unowa_overlay_log_count` 7, `unimplemented` 0,
+`pack_result` 0. At `PRINTSYS_RunJob` entry the job is correct
+(`blitGlyph = 0x0010CEA4`, `bmp = 0x00533CC4`, `font = 0x00533CFC`); before the
+first glyph call `_PrintJobWork` and `_pGlyphBmp` hold 4bpp tile data and
+`blitGlyph` is `0x47040704`. The writer of that overwrite is the open question.
 
 Kohjoh and sinjoh were audited for reusable work; the decisions and citations
 are in `docs/reuse-audit.md`.
@@ -330,3 +389,9 @@ are in `docs/reuse-audit.md`.
   `dsi_nand.bin` were all scanned with `tools/modcrypt.py check --dsi-bios`
   and none contains it. A 16-byte little-endian dump via `--dsi-key` is the
   only accepted form. unowa's own generator remains the fallback.
+- `tools/pack_game_data.py` writes a supported Gen IV digest into the pack
+  header because sinjoh's `pak_open` (`pak.c:88-91,160`) accepts only three
+  Platinum revision hashes and the file is a pinned dependency. The index and
+  file bytes are the player's Black/White NitroFS files; only the header's
+  validation tag is borrowed. Replacing it needs a build-tree `pak.c` override
+  or an upstream entry for the Black/White hashes.

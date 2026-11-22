@@ -316,6 +316,26 @@ int __wrap_NitroPort_Unimplemented(const char *what)
 }
 
 /*
+ * OS_Terminate is the game's "stop for good" (sinjoh port_os.c:440-446). Its
+ * weak NitroPort_Terminate calls abort(), which unwinds into libctru's exit
+ * path and looks like a core fault. Record who called it so a stopped session
+ * can be symbolized, then keep the real behaviour.
+ */
+unsigned int unowa_terminate_count;
+unsigned int unowa_terminate_caller;
+
+extern void __real_OS_Terminate(void);
+
+void __wrap_OS_Terminate(void)
+{
+    unowa_terminate_count++;
+    if (unowa_terminate_caller == 0) {
+        unowa_terminate_caller = (unsigned int)(uintptr_t)__builtin_return_address(0);
+    }
+    __real_OS_Terminate();
+}
+
+/*
  * Aletheia's PM_Init initialises the Gen V PM state at g_02153000 and
  * registers its reply callback. sinjoh's os_init.o calls sinjoh's PM_Init
  * instead, so the game's PMi_WaitBusy spins on a lock nobody clears. PM_Init
@@ -535,6 +555,21 @@ int FSi_IsUnreadableRomOffset(void *arc, u32 offset)
 {
     (void)arc; (void)offset;
     return 0;
+}
+
+/*
+ * FS_GetLength (Aletheia fs_file.c:343) is absent from sinjoh's libnitro, and
+ * its FS_GetFileLength route issues archive command 15, which the pack archive
+ * proc does not implement. The length FS_OpenFile recorded is already final:
+ * nitro/fs/file.h puts prop.file at +0x20 with top at +0x24 and bottom at
+ * +0x28 (offsets confirmed by compiling offsetof against the same headers).
+ */
+u32 FS_GetLength(void *file)
+{
+    const unsigned char *p = (const unsigned char *)file;
+    u32 top = *(const u32 *)(p + 0x24);
+    u32 bottom = *(const u32 *)(p + 0x28);
+    return bottom - top;
 }
 
 /* RC4 state is documented in arm9/rc4.h: i, j, then the 256-byte S box. */
@@ -771,13 +806,15 @@ u32 bw_limit_get(int id)
  *   SDK_IRQ_STACKSIZE           0x00000800  arm9/os_arena.c:26
  *   SDK_AUTOLOAD_MAIN_TWL_START 0x02FE0000  arm9/gf_overlay.c:29
  *   abs_id_0                    0x00000000  ov029/c_gear.c:187
- *   ov020_id                    0x00000014  src/matched/ov/ov010_func_0215FA00.c:13
+ *
+ * ov020_id (0x14, ov010/event_wifi_proc.c:152) is not a `.set` here: GNU ld
+ * relocates a reference to an absolute symbol with R_ARM_ABS32, and 3dsxtool
+ * rejects an absolute target below the image base ("Relocation to invalid
+ * address"). tools/patch_sources.py inlines that one constant instead.
  */
 __asm__(".global SDK_IRQ_STACKSIZE\n"
         ".set SDK_IRQ_STACKSIZE, 0x800\n"
         ".global SDK_AUTOLOAD_MAIN_TWL_START\n"
         ".set SDK_AUTOLOAD_MAIN_TWL_START, 0x02FE0000\n"
         ".global abs_id_0\n"
-        ".set abs_id_0, 0\n"
-        ".global ov020_id\n"
-        ".set ov020_id, 0x14\n");
+        ".set abs_id_0, 0\n");

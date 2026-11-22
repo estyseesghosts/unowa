@@ -53,6 +53,8 @@ endif
 
 OUT := build/game/3ds
 LIB := $(OUT)/libunowa_game.a
+TOOLS := $(dir $(lastword $(MAKEFILE_LIST)))../tools
+DATA_IMAGE_PY := $(TOOLS)/gen_data_image.py
 
 # M2/M3 presentation. The M0 GPU renderer and its log/storage dependencies are
 # compiled with the root Makefile's ARM11 flags (see Makefile:58-68) and linked
@@ -82,7 +84,8 @@ DEPS     := $(GAME_OBJS:.o=.d)
 # names are identical, so the rest of the closure sees the original functions.
 PATCHED := ov009/wcm_wmif.c ov013/vct_audio.c twl/nwmif.c \
            twl/dsp_pipe.c arm9/scfg_proc.c ov094/btlv_input.c \
-           ov119/pokemontrade_2d.c twl/pm.c arm9/gf_overlay.c
+           ov119/pokemontrade_2d.c twl/pm.c arm9/gf_overlay.c \
+           ov010/event_wifi_proc.c
 PATCHED_OBJS := $(patsubst %.c,$(OUT)/obj/%.o,$(PATCHED))
 NORMAL_OBJS  := $(filter-out $(PATCHED_OBJS),$(GAME_OBJS))
 
@@ -118,7 +121,7 @@ PORT_PRELUDE := -include $(PORT_IOREG_H)
 
 PORT_CFLAGS := -std=gnu99 -fgnu89-inline -fno-strict-aliasing -fno-short-enums \
                -fsigned-char -fwrapv -fno-aggressive-loop-optimizations \
-               -fno-delete-null-pointer-checks -O2 -g \
+               -fno-delete-null-pointer-checks -fno-builtin -O2 -g \
                -Wall -Wno-unused-function -Wno-unused-variable -Wno-missing-braces \
                -Wno-unknown-pragmas -Wno-unused-but-set-variable -Wno-parentheses \
                -Wno-switch -Wno-multichar \
@@ -151,9 +154,9 @@ $(PORT_IOREG_H): $(GAME)/sdk_ioreg.h tools/gen_port_ioreg_header.py
 	@mkdir -p $(dir $@)
 	@python3 tools/gen_port_ioreg_header.py --source $(GAME) --out $@
 
-$(OUT)/gen/ds_data.o: $(OUT)/probe-undefined.txt
+$(OUT)/gen/ds_data.o: $(OUT)/probe-undefined.txt $(DATA_IMAGE_PY)
 	@mkdir -p $(dir $@)
-	@python3 tools/gen_data_image.py --aletheia $(ALETHEIA_DIR) \
+	@python3 $(DATA_IMAGE_PY) --aletheia $(ALETHEIA_DIR) \
 	    --undefined $< --out $(OUT)/gen/ds_data.c \
 	    --reloc-name unowa_ds_relocate
 	@$(DEVKITARM)/bin/arm-none-eabi-gcc $(PORT_CFLAGS) -Wno-unused-const-variable \
@@ -214,12 +217,12 @@ $(OUT)/probe-gv-undefined.txt: $(REN_DIR)/renamed.stamp
 
 # The Gen V objects introduce data references the game-only probe never saw.
 # Extend the full data image with definitions for those additional symbols.
-$(OUT)/gen/ds_data_gv.o: $(OUT)/probe-gv-undefined.txt $(OUT)/probe-undefined.txt
+$(OUT)/gen/ds_data_gv.o: $(OUT)/probe-gv-undefined.txt $(OUT)/probe-undefined.txt $(DATA_IMAGE_PY)
 	@mkdir -p $(dir $@)
 	@LC_ALL=C sort $(OUT)/probe-undefined.txt > $(OUT)/u-base.sorted
 	@LC_ALL=C sort $< > $(OUT)/u-gv.sorted
 	@LC_ALL=C comm -13 $(OUT)/u-base.sorted $(OUT)/u-gv.sorted > $(OUT)/u-gv-extra.txt
-	@python3 tools/gen_data_image.py --aletheia $(ALETHEIA_DIR) \
+	@python3 $(DATA_IMAGE_PY) --aletheia $(ALETHEIA_DIR) \
 	    --undefined $(OUT)/u-gv-extra.txt --out $(OUT)/gen/ds_data_gv.c \
 	    --reloc-name unowa_gv_relocate
 	@$(DEVKITARM)/bin/arm-none-eabi-gcc $(PORT_CFLAGS) -Wno-unused-const-variable \
@@ -253,6 +256,7 @@ $(OUT)/m1-test.elf: $(OUT)/gen/m1_main.o $(OUT)/probe-gv-undefined.txt \
 	    -fno-short-enums -D__3DS__ -specs=3dsx.specs \
 	    -L$(DEVKITPRO)/libctru/lib -Wl,--gc-sections \
 	    -Wl,--no-enum-size-warning -Wl,--wrap=NitroPort_Unimplemented \
+	    -Wl,--wrap=OS_Terminate \
 	    -Wl,--start-group $< $(GAME_REN) $(GV_LIB) \
 	    $(NITRO)/build/3ds/libnitro.a \
 	    $(NNS)/build/3ds/libnitrosystem.a \
@@ -310,6 +314,12 @@ $(OUT)/src/ov119/pokemontrade_2d.c: $(GAME)/ov119/pokemontrade_2d.c
 	@python3 tools/patch_sources.py --source $(GAME) --out $(OUT)/src \
 	    --fixup vram_enum_base ov119/pokemontrade_2d.c
 
+# ov020_id is the absolute DS value 0x14; see PORT_FIXUPS.
+$(OUT)/src/ov010/event_wifi_proc.c: $(GAME)/ov010/event_wifi_proc.c
+	@mkdir -p $(dir $@)
+	@python3 tools/patch_sources.py --source $(GAME) --out $(OUT)/src \
+	    --fixup ov020_id_constant ov010/event_wifi_proc.c
+
 $(PATCHED_OBJS): $(OUT)/obj/%.o: $(OUT)/src/%.c | $(PORT_IOREG_H)
 	@mkdir -p $(dir $@)
 	@$(DEVKITARM)/bin/arm-none-eabi-gcc $(PORT_CFLAGS) $(PORT_PRELUDE) \
@@ -365,7 +375,10 @@ $(REN_DIR):
 
 # $(file >...) expands before the recipe runs, so the directory must already
 # exist as a prerequisite rather than being made by an earlier recipe line.
-$(REN_DIR)/renamed.stamp: $(LIB) $(GV_OBJS) $(OUT)/gen/kj_g3.o $(OUT)/gen/m1_entry.o $(OUT)/gen/port_stubs.o | $(REN_DIR)
+$(REN_DIR)/renamed.stamp: $(LIB) $(GV_OBJS) $(OUT)/gen/kj_g3.o $(OUT)/gen/m1_entry.o $(OUT)/gen/port_stubs.o \
+                          $(dir $(lastword $(MAKEFILE_LIST)))gv_sdk_sources.txt \
+                          $(dir $(lastword $(MAKEFILE_LIST)))game_blocklist.txt \
+                          $(dir $(lastword $(MAKEFILE_LIST)))game_overlay_blocklist.txt | $(REN_DIR)
 	@$(file >$(REN_DIR)/gv_objects.txt,$(GV_OBJS))
 	@python3 tools/rename_genv.py --binutils $(DEVKITARM)/bin \
 	    --gv-dir $(OUT)/gv_raw --objects-file $(REN_DIR)/gv_objects.txt \

@@ -16,11 +16,24 @@ at this milestone.
 ROM data also stores absolute DS addresses (pointer tables, path tables). The
 bytes are emitted verbatim, so those words point into unmapped DS space on the
 3DS. The generator therefore emits a relocation pass, `*_relocate()`, that
-rewrites every stored *data* pointer to the emitted array that holds the bytes
-it names. It is restricted to the ARM9 static region, whose addresses are
-unique; overlay load addresses overlap (237 overlays share 58 slots), so
-overlay-internal pointers are left for the overlay packaging work. Odd values
-are Thumb code pointers and are never rewritten as data.
+rewrites stored pointers:
+
+  * data pointers become the emitted array that holds the target bytes;
+  * function pointers become the *port* symbol for the function, taken from
+    Aletheia's layout/function_addrs.tsv (address -> name, source file, ISA).
+    The stored value is the symbol's ARM11 address, so its low bit follows how
+    the port compiled the function, not the DS ISA: the port builds these TUs
+    as ARM, and an ARM address is what `blx` must receive. Referencing the
+    symbol from this data image also keeps it through `--gc-sections`, which
+    previously dropped format handlers reachable only through such a table.
+
+Both passes cover only the ARM9 static region, whose addresses are unique.
+Overlays share 58 load slots across 237 files, so an overlay address can name
+several different functions; overlay-internal pointers wait for the overlay
+packaging work. A function pointer is only rewritten when its source file is
+in the port's compile set and the function is not file-static, so the
+reference always resolves. Odd values that are not a known Thumb function
+start are left alone.
 
 Usage:
     python tools/gen_data_image.py --undefined FILE --out FILE
@@ -35,6 +48,11 @@ import re
 SYMBOL_RE = re.compile(r"\*\s+([A-Za-z_]\w*)\s+0x([0-9A-Fa-f]{8})\s+(data|arm|thumb)")
 MIN_BYTES = 4
 MAX_BYTES = 8192
+
+# Aletheia's function table is authoritative for DS code addresses. The port
+# compiles the same TUs, skipping the files listed in these blocklists; a
+# reference to a function from a skipped file would not link.
+BLOCKLISTS = ("game_blocklist.txt", "game_overlay_blocklist.txt")
 
 # Data symbols the port defines itself. Emitting the ROM bytes for these would
 # store raw DS addresses that no ARM11 process can call; see port_stubs.c.
@@ -60,6 +78,56 @@ def symbol_addresses(aletheia):
         for match in SYMBOL_RE.finditer(text):
             name, addr, kind = match.group(1), int(match.group(2), 16), match.group(3)
             result.setdefault(name, (addr, kind))
+    return result
+
+
+def compiled_sources(aletheia):
+    """Set of `src/game/...` TU paths the port compiles (engine/game.mk:72-75).
+
+    Mirrors the makefile rule: every `src/game/<dir>/*.c` except the blocklist
+    entries. A function from a file outside this set has no port object, so its
+    address must not be emitted as a relocation target.
+    """
+    root = aletheia / "src" / "game"
+    blocked = set()
+    engine = pathlib.Path(__file__).resolve().parent.parent / "engine"
+    for name in BLOCKLISTS:
+        path = engine / name
+        for line in path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line and not line.startswith("#"):
+                blocked.add(line)
+    return {
+        "src/game/" + path.relative_to(root).as_posix()
+        for path in root.glob("*/*.c")
+        if path.relative_to(root).as_posix() not in blocked
+    }
+
+
+def function_addresses(aletheia, compiled):
+    """Map stored pointer value -> port symbol name, for uniquely named code.
+
+    Aletheia's function_addrs.tsv gives one row per function: region, address,
+    name, ISA, size, source file, static flag. Only ARM9-region, non-static
+    functions from compiled files are usable: overlay addresses are shared
+    between files, static functions have no external symbol, and a skipped
+    file has no port object.
+    """
+    table = aletheia / "layout" / "function_addrs.tsv"
+    result = {}
+    conflicts = set()
+    lines = table.read_text(encoding="utf-8").splitlines()
+    for line in lines[1:]:
+        region, address, name, isa, _size, source, static = line.split("\t")
+        if region != "arm9" or static != "no" or source not in compiled:
+            continue
+        value = int(address, 16) | (1 if isa == "thumb" else 0)
+        if value in result and result[value] != name:
+            conflicts.add(value)
+            continue
+        result[value] = name
+    for value in conflicts:
+        del result[value]
     return result
 
 
@@ -103,7 +171,8 @@ def pointer_target(spans, starts, value):
     return None
 
 
-def generate(undefined, symbols, regions, arm9_base, out_path, reloc_name):
+def generate(undefined, symbols, regions, arm9_base, functions, out_path,
+             reloc_name):
     """Write C definitions for data symbols found in the ROM images."""
     all_addresses = sorted(
         addr for addr, _kind in symbols.values() if addr >= 0x02000000
@@ -158,9 +227,14 @@ def generate(undefined, symbols, regions, arm9_base, out_path, reloc_name):
         lines.append("")
         zero_filled.append(name)
 
-    # Relocate stored data pointers. Only the ARM9 static region is handled:
-    # its addresses are unique, whereas overlays share 58 load slots across
-    # 237 files and cannot be disambiguated until overlay packaging.
+    # Relocate stored pointers. Only the ARM9 static region is handled: its
+    # addresses are unique, whereas overlays share 58 load slots across 237
+    # files and cannot be disambiguated until overlay packaging.
+    #
+    # Walk 4-byte words at addresses aligned in DS space, not at array-relative
+    # offsets: 254 of the emitted objects start at a non-multiple of 4, and a
+    # pointer inside such an object does not sit at a multiple of 4 from the
+    # array base.
     arm9_spans = sorted(
         (addr, addr + len(data), name, addr, len(data))
         for name, addr, data, region in rom_arrays
@@ -169,15 +243,24 @@ def generate(undefined, symbols, regions, arm9_base, out_path, reloc_name):
     arm9_starts = [span[0] for span in arm9_spans]
     relocs = []
     skipped = 0
+    fnptrs = []
+    fn_unresolved = 0
     for name, address, data, region in rom_arrays:
         if regions[region][0] != arm9_base:
             continue
-        for offset in range(0, len(data) - 3, 4):
+        for offset in range((-address) % 4, len(data) - 3, 4):
             value = int.from_bytes(data[offset:offset + 4], "little")
+            function = functions.get(value)
+            if function is not None:
+                fnptrs.append((name, offset, function, value))
+                continue
             if not 0x02000000 <= value < 0x03000000:
                 continue
             if value & 1:
-                skipped += 1   # Thumb code pointer, not data
+                # Odd values are Thumb code pointers. A known Thumb function
+                # was handled above; anything else is code this image cannot
+                # name, so it stays as the ROM word.
+                fn_unresolved += 1
                 continue
             target = pointer_target(arm9_spans, arm9_starts, value)
             if target is None:
@@ -207,11 +290,40 @@ def generate(undefined, symbols, regions, arm9_base, out_path, reloc_name):
     if not relocs:
         lines.append("    0,")
     lines.append("};")
+
+    lines.append("/* DS function pointers: each matched a uniquely named ARM9"
+                 " function in Aletheia's function_addrs.tsv whose source file the"
+                 " port compiles. The value is the port symbol, so the ISA bit is"
+                 " whatever the port built. */")
+    fn_name = reloc_name + "_functions"
+    lines.append("unsigned int %s_count = %d;" % (fn_name, len(fnptrs)))
+    lines.append("unsigned int %s_unresolved = %d;" % (fn_name, fn_unresolved))
+    # The prototypes are unknown here and irrelevant: only the addresses are
+    # taken. Declaring each name keeps this file self-contained.
+    for function in sorted({entry[2] for entry in fnptrs}):
+        lines.append("extern void %s(void);" % function)
+    lines.append("static unsigned int *const %s_slots[%d] = {"
+                 % (fn_name, max(1, len(fnptrs))))
+    for name, offset, _function, _value in fnptrs:
+        lines.append("    (unsigned int *)(void *)(%s + %d)," % (name, offset))
+    if not fnptrs:
+        lines.append("    0,")
+    lines.append("};")
+    lines.append("static void (*const %s_values[%d])(void) = {"
+                 % (fn_name, max(1, len(fnptrs))))
+    for _name, _offset, function, _value in fnptrs:
+        lines.append("    (void (*)(void))%s," % function)
+    if not fnptrs:
+        lines.append("    0,")
+    lines.append("};")
+
     lines.append("void %s(void)" % reloc_name)
     lines.append("{")
     lines.append("    unsigned int i;")
     lines.append("    for (i = 0; i < %s_count; i++)" % reloc_name)
     lines.append("        *%s_slots[i] = (unsigned int)%s_values[i];" % (reloc_name, reloc_name))
+    lines.append("    for (i = 0; i < %s_count; i++)" % fn_name)
+    lines.append("        *%s_slots[i] = (unsigned int)%s_values[i];" % (fn_name, fn_name))
     lines.append("}")
     lines.append("")
 
@@ -228,7 +340,7 @@ def generate(undefined, symbols, regions, arm9_base, out_path, reloc_name):
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text("\n".join(lines), encoding="utf-8")
-    return written, zero_filled, len(relocs), skipped
+    return written, zero_filled, len(relocs), skipped, len(fnptrs)
 
 
 def main():
@@ -244,12 +356,17 @@ def main():
     undefined = set(args.undefined.read_text().split()) - PORT_DEFINED
     symbols = symbol_addresses(args.aletheia)
     regions, arm9_base = region_images(args.aletheia)
-    written, zero_filled, relocs, skipped = generate(
-        undefined, symbols, regions, arm9_base, args.out, args.reloc_name)
+    compiled = compiled_sources(args.aletheia)
+    functions = function_addresses(args.aletheia, compiled)
+    written, zero_filled, relocs, skipped, fnptrs = generate(
+        undefined, symbols, regions, arm9_base, functions, args.out,
+        args.reloc_name)
     print("generated %d ROM-backed and %d zero-filled data symbols in %s"
           % (len(written), len(zero_filled), args.out))
     print("  %s: %d data pointers relocated, %d non-data/out-of-range words skipped"
           % (args.reloc_name, relocs, skipped))
+    print("  %s: %d function pointers resolved from %d candidate symbols"
+          % (args.reloc_name, fnptrs, len(functions)))
 
 
 if __name__ == "__main__":
