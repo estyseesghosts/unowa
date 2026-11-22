@@ -9,7 +9,7 @@ verified on Old 3DS. Do not collapse them.
 |---|---|---|---|
 | M0 — Bootstrap | implemented, compiled, tested in emulator | see below | native `.3dsx`, release/profile, async SD log, 30 Hz GPU presentation; both screens render the clear colour |
 | M1 — Game compilation | implemented; compiled; linked; tested headlessly | `link-final` builds `m1-test.3dsx`; see below | boots, then faults on DS I/O in M2 territory |
-| M2 - Native boot | in progress; tested headlessly | game's own `NitroMain` loop now runs one tick per V-blank; 17 overlays; intro cutscene reached in LOTUS; clear-frame presentation reaches both screens | game graphics need M3/M4; input forwarding not yet exercised |
+| M2 - Native boot | in progress; tested headlessly | game's own `NitroMain` loop now runs one tick per V-blank; 18 overlays; the intro is reached and the DS pad is forwarded (START skips the intro) | 3D scenes and display capture are M3/M4 work |
 | M3 — 2D | implemented for the boot and intro scenes; rendering in LOTUS | DS 2D engine on the PICA: logo, copyright, the full intro movie and the Pokémon Black logo captured; `mainloop` 1194, `presents` 597 over 1200 frames; direct-colour affine BGs read 16-bit bitmaps | text/affine/extended BGs, OBJ, windows, blending, brightness, direct-colour bitmaps; 256-colour bitmap BGs and the wide art remain out |
 | M4 — 3D | in progress | geometry engine and storage wired; title demo's model/texture/animation resources now load (anmTbl relocation fixed); no 3D scene is published yet because the title menu faults first in CLACT | capture (`DISPCAPCNT`) is not modelled; the title menu crash blocks reaching the 3D draw |
 | M5 — Gameplay | not started | | input, scripts, audio, resources, saves |
