@@ -541,7 +541,7 @@ passes the counter readers, `SAVE_CONTROL_Create`, `CONFIG_ApplyTextLanguage`
 and `GFL_NET_ERR_Init`, and stops at frame 16 in `GFL_HEAP_Alloc` reading
 `0x020A7234`: `net_err.c:468` passes the ARM9 *data* address of its file-name
 string as `(const void *)0x020A7234`. That is a main-RAM literal outside the
-shared area; see "Data model" below.
+shared area; `docs/eidos-review.md` section 2 is the general fix.
 
 The save device is not a stub: `sdmc:/3ds/unowa/saves/<edition>.sav` (the path
 `storage/paths.c` already defines) is created at 512 KiB of `0xFF` on first use
