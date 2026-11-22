@@ -26,17 +26,6 @@ int g_pm_language = 0;  /* English: version.h:61 */
 int g_pm_version = 0;   /* Black: version.h:28 */
 
 /*
- * Data symbols with no address annotation in src/game. The names encode the
- * DS address; extents below are minima from the referencing code, not the
- * original sizes. M2 must place them at their real addresses and extents.
- *   twl/pm.c:51,56-57 and twl/nwm_unloaddev.c:32
- */
-unsigned int d_020A8724[16];
-unsigned char d_02153000[0x18];
-void *d_02732FA4;
-unsigned char d_027341C8;
-
-/*
  * Memory helpers hand-written in ARM on the DS (mi_memory.h:21-25). The 3DS
  * needs the same operations, not the same instruction sequence, so the libc
  * routines are the port implementation.
@@ -174,6 +163,146 @@ MICResult MIC_StopLimitedSampling(void)
 }
 
 /*
+ * The MSL's internal copy. arm9/msl_printf.c:44 declares it with memcpy's
+ * signature and uses it to copy the "inf" strings (msl_printf.c:625-633); its
+ * body is in the MSL runtime, which Aletheia does not carry as source.
+ */
+void *__memcpy(void *destination, const void *source, unsigned long size)
+{
+    return memcpy(destination, source, size);
+}
+
+/*
+ * MATH_QSort, translated from the hand-written ARM in Aletheia
+ * arm9/qsort.c:23-200 (the same routine sinjoh's SDK keeps as asm,
+ * libraries/math/src/qsort.c:5; neither compiles for the ARM11). quicksort is
+ * not stable, so the order equal elements end in depends on the exact steps;
+ * this follows the original's: the pivot index, the partition scan, the
+ * two-element case and the order sub-ranges are pushed. The explicit stack
+ * holds (lo, hi) pairs, 8 bytes per bit of `count`, as the original sizes it.
+ */
+typedef int32_t (*math_compare_fn)(void *a, void *b);
+
+static void qsort_swap(unsigned char *a, unsigned char *b, uint32_t width)
+{
+    if ((width & 3u) == 0) {
+        for (uint32_t i = 0; i < width; i += 4) {
+            uint32_t word;
+
+            memcpy(&word, a + i, 4);
+            memcpy(a + i, b + i, 4);
+            memcpy(b + i, &word, 4);
+        }
+        return;
+    }
+    for (uint32_t i = 0; i < width; ++i) {
+        const unsigned char byte = a[i];
+
+        a[i] = b[i];
+        b[i] = byte;
+    }
+}
+
+static uint32_t bit_length(uint32_t value)
+{
+    return value == 0 ? 0 : 32u - (uint32_t)__builtin_clz(value);
+}
+
+void MATH_QSort(void *head, uint32_t count, uint32_t width, math_compare_fn compare,
+                void *stack_buffer)
+{
+    unsigned char **stack;
+    unsigned char **top;
+    uint32_t shift;
+
+    if (count <= 1) {
+        return;
+    }
+    stack = stack_buffer != NULL
+                ? stack_buffer
+                : __builtin_alloca((size_t)bit_length(count) * 2 * sizeof(*stack));
+    top = stack;
+    *top++ = head;
+    *top++ = (unsigned char *)head + (count - 1) * width;
+    shift = bit_length(width);
+
+    while (top != stack) {
+        unsigned char *hi = *--top;
+        unsigned char *lo = *--top;
+        unsigned char *i;
+        unsigned char *j;
+
+        if ((uint32_t)(hi - lo) == width) {
+            if (compare(lo, hi) > 0) {
+                qsort_swap(lo, hi, width);
+            }
+            continue;
+        }
+        qsort_swap(lo + (((uint32_t)(hi - lo)) >> shift) * width, lo, width);
+        i = lo + width;
+        j = hi;
+        for (;;) {
+            while (i < hi && compare(i, lo) < 0) {
+                i += width;
+            }
+            while (compare(j, lo) > 0) {
+                j -= width;
+            }
+            if (i >= j) {
+                break;
+            }
+            qsort_swap(i, j, width);
+            i += width;
+            j -= width;
+            if (i > j) {
+                break;
+            }
+        }
+        qsort_swap(lo, j, width);
+        if (j - lo > hi - j) {
+            if (lo < j - width) {
+                *top++ = lo;
+                *top++ = j - width;
+            }
+            if (j + width < hi) {
+                *top++ = j + width;
+                *top++ = hi;
+            }
+        } else {
+            if (j + width < hi) {
+                *top++ = j + width;
+                *top++ = hi;
+            }
+            if (lo < j - width) {
+                *top++ = lo;
+                *top++ = j - width;
+            }
+        }
+    }
+}
+
+/*
+ * The MSL's double subtraction helper. arm9/msl_ansi_fp.c:79 declares it
+ * (`extern double _dsub(double a, double b)`, original 0x0209AF34, ARM) for
+ * __num2dec; the original is a Metrowerks runtime routine with no C source.
+ */
+double _dsub(double a, double b)
+{
+    return a - b;
+}
+
+/*
+ * The runtime's float-to-int conversion. arm9/iss_zone_sys.c lists `_ffix`
+ * (0x0209C494, ARM) in its header for the `(int)(float)` casts at lines
+ * 307 and 311, so it is C's truncating conversion. ov131/p_sta_sub.c:269
+ * declares it by name (`extern int _ffix(float)`) and calls it directly.
+ */
+int _ffix(float value)
+{
+    return (int)value;
+}
+
+/*
  * Big-integer limb readers from ov009/biginteger.c:305-333. The originals are
  * Metrowerks asm reading halfwords before the pointer; the C forms below
  * assemble the same 64-bit values from those limbs.
@@ -239,8 +368,10 @@ int OSi_IsRunOnTwl(void)
  * The ROM's Wi-Fi device table is a row of DS Thumb function pointers into
  * ov009, which is not linked. GFL_NET_SetupHeaps calls slot 0 (initLibrary)
  * during boot, so a table of inert stubs keeps that path safe. The network
- * features themselves are outside M2; gen_data_image.py excludes the ROM
- * table so these pointers are not mistaken for callable addresses.
+ * features themselves are outside M2. The flat image binds a data name only
+ * when nothing defines it (flat_names.ld PROVIDE, tools/gen_flat_image.py),
+ * so this definition replaces the ROM table and its pointers are never
+ * mistaken for callable addresses.
  */
 static int unowa_net_stub(void)
 {
@@ -251,14 +382,6 @@ static int unowa_net_stub(void)
 int (*volatile _wifiDeviceTable[51])(void) = {
     [0 ... 50] = unowa_net_stub,
 };
-
-/*
- * Backing store for the Gen V SDK's "extra heap", whose source hardcodes the
- * DS main-RAM base 0x02000000. sinjoh's arena starts at NitroPort_MainMem[0],
- * so using the shadow array there makes the 0x4000-byte extra heap overwrite
- * the arena records. A dedicated buffer keeps the two regions disjoint.
- */
-unsigned char unowa_extra_heap[0x4000];
 
 /*
  * Overlay-load trace for M2 acceptance. GF_OVERLAY_Load calls this once per
@@ -628,8 +751,9 @@ static u32 sha1_load_be(const unsigned char *p)
 /*
  * Aletheia declares this as an extern function pointer whose ROM value is the
  * raw DS address 0x02081e7c (MATHi_SHA1Transform). An ARM11 process cannot
- * call that address, so gen_data_image.py excludes it from the data image and
- * the port defines it here. The initialiser also keeps the C transform
+ * call that address, so the port defines it here; the flat image's PROVIDE
+ * binding then yields to this definition (tools/gen_flat_image.py). The
+ * initialiser also keeps the C transform
  * reachable under -Wl,--gc-sections: MATH_SHA1Update calls through this
  * pointer, while MATHi_SetOverlayTableMode (the transform's only direct
  * reference) is not linked.
@@ -814,17 +938,15 @@ u32 bw_limit_get(int id)
 /*
  * Address-valued linker symbols. Sources of the values:
  *   SDK_IRQ_STACKSIZE           0x00000800  arm9/os_arena.c:26
- *   SDK_AUTOLOAD_MAIN_TWL_START 0x02FE0000  arm9/gf_overlay.c:29
  *   abs_id_0                    0x00000000  ov029/c_gear.c:187
  *
- * ov020_id (0x14, ov010/event_wifi_proc.c:152) is not a `.set` here: GNU ld
+ * SDK_AUTOLOAD_MAIN_TWL_START (0x02FE0000, arm9/gf_overlay.c:29) is a DS
+ * main-RAM address, bound in the flat image by tools/gen_flat_image.py. The
+ * ovNNN_id overlay numbers are inlined by tools/patch_sources.py: GNU ld
  * relocates a reference to an absolute symbol with R_ARM_ABS32, and 3dsxtool
- * rejects an absolute target below the image base ("Relocation to invalid
- * address"). tools/patch_sources.py inlines that one constant instead.
+ * rejects an absolute target below the image base.
  */
 __asm__(".global SDK_IRQ_STACKSIZE\n"
         ".set SDK_IRQ_STACKSIZE, 0x800\n"
-        ".global SDK_AUTOLOAD_MAIN_TWL_START\n"
-        ".set SDK_AUTOLOAD_MAIN_TWL_START, 0x02FE0000\n"
         ".global abs_id_0\n"
         ".set abs_id_0, 0\n");

@@ -25,17 +25,6 @@ PORT_FIXUPS = {
         ("#define reg_SCFG_CLK (*(vu16 *)REG_SCFG_CLK_ADDR)",
          "#define reg_SCFG_CLK 0  /* port: no DS SCFG_CLK on ARM11 */", 1),
     ],
-    # The port maps HW_DB_OBJ_VRAM to a shadow-array address, which is not an
-    # integer constant expression in C. These locals used it as an enum value.
-    # OS_CreateExtraHeap hardcodes the DS main-RAM base as its Cell backing
-    # store. That address is unmapped in an ARM11 3DSX. A dedicated buffer is
-    # used rather than NitroPort_MainMem, whose first bytes are the SDK arena
-    # and would be overwritten by the extra heap's 0x4000-byte region.
-    "extra_heap_mainmem": [
-        ("                Cell *cell = (Cell *)0x02000000;",
-         "                extern unsigned char unowa_extra_heap[];\n"
-         "                Cell *cell = (Cell *)(void *)unowa_extra_heap;", 1),
-    ],
     # M2 acceptance asks that overlay loads and initialisers be logged. The
     # game loads every overlay through this one entry point, so a call at its
     # head observes each load without changing any overlay state.
@@ -46,16 +35,6 @@ PORT_FIXUPS = {
          "int GF_OVERLAY_Load(s32 handle)\n{\n"
          "    NitroPort_Log(\"[unowa] overlay load %d\", (int)handle);\n"
          "    unowa_log_overlay((int)handle);\n", 1),
-    ],
-    # Aletheia records ov020_id as the absolute DS value 0x14
-    # (src/matched/ov/ov010_func_0215FA00.c:13) and the only two uses are in
-    # this file. GNU ld relocates `(uptr)ov020_id` with R_ARM_ABS32 against
-    # that ABS symbol; 3dsxtool refuses an absolute target below the 3DSX
-    # image base ("Relocation to invalid address"), so inline the constant.
-    "ov020_id_constant": [
-        ("extern unsigned char ov020_id[];",
-         "#define ov020_id 0x14  /* port: absolute DS symbol, see port_stubs.c */",
-         1),
     ],
     # sinjoh emulates DS interrupts by calling handlers directly, never by
     # entering ARM IRQ mode, so the DS's mode-gated FIFO drain in PMi_WaitBusy
@@ -74,11 +53,28 @@ PORT_FIXUPS = {
          "void PMi_WaitBusy(void)\n{\n"
          "    unowa_pm_ensure_ready();\n", 1),
     ],
+    # Aletheia splits one original ov016 unit across these files. closeFadeStep
+    # (0x021C3794) is defined static in sceneoptmovconfirm1.c and called from
+    # sceneoptmovconfirm.c; DWCi_SceneOptMovWait is global in
+    # sceneoptmovwait.c:121 but prototyped static in sceneoptmovconfirm1.c.
+    # mwcc's single unit resolved both; separate GCC units need external
+    # linkage. Found by scanning every compiled TU for a static prototype with
+    # no body in the same file.
+    "ov016_split_unit_caller": [
+        ("static void closeFadeStep(void);", "void closeFadeStep(void);", 1),
+    ],
+    "ov016_split_unit_owner": [
+        ("static void closeFadeStep(void);", "void closeFadeStep(void);", 1),
+        ("static void closeFadeStep(void)\n{", "void closeFadeStep(void)\n{", 1),
+        ("static void DWCi_SceneOptMovWait(void);", "void DWCi_SceneOptMovWait(void);", 1),
+    ],
     # The switch is on NDMA[ch].cnt & 0x0F000000, so this case is the DS I/O
     # destination-region code 0x04000000, not a pointer to DISPCNT.
     "pm_ndma_case": [
         ("case REG_DISPCNT_ADDR:", "case 0x04000000:", 1),
     ],
+    # The port maps HW_DB_OBJ_VRAM to a shadow-array address, which is not an
+    # integer constant expression in C. These locals used it as an enum value.
     "vram_enum_base": [
         ("enum { VRAM_BASE = HW_DB_OBJ_VRAM } vram;",
          "uptr vram = HW_DB_OBJ_VRAM;", None),
@@ -106,7 +102,7 @@ PORT_FIXUPS = {
 SHARED_LITERAL = re.compile(r"(?<![\w.])0x02[7Ff][Ff][Ff]([0-9A-Fa-f]{3})(?![\w])")
 SHARED_MACRO = re.compile(r"^[ \t]*#[ \t]*define[ \t]+([A-Za-z_]\w*)[ \t]+"
                           r"(0x02[7Ff][Ff][Ff][0-9A-Fa-f]{3})[ \t]*$", re.M)
-SHARED_DECL = "extern unsigned char NitroPort_MainMem[];  /* port: DS shared area */\n"
+SHARED_DECL = "extern unsigned char NitroPort_MainMem[];  /* port: DS main RAM, flat */\n"
 INCLUDE_LINE = re.compile(r"^[ \t]*#[ \t]*include\b.*$", re.M)
 # Comments and string/char literals; the rewrite applies only between them.
 NON_CODE = re.compile(r'//[^\n]*|/\*.*?\*/|"(?:\\.|[^"\\\n])*"|\'(?:\\.|[^\'\\\n])*\'',
@@ -176,6 +172,289 @@ def rewrite_shared_area(text, header_macros):
     return text, count
 
 
+# DS main RAM, flat. unowa keeps the DS main-RAM image at its DS offsets in
+# NitroPort_MainMem (tools/gen_flat_image.py, engine/runtime/flat_memory.h), so
+# a literal main-RAM address in code becomes the same offset into it. Only a
+# literal used as an address is rewritten: one directly after a pointer cast.
+# Literals in the range are also PXI command words, DMA flags and MD5
+# constants (`0x02000000 | 0x6200` in arm9/pm.c, `0x02441453` in ov009/md5c.c)
+# and keep their value; Eidos's dsaddr.py draws the same line
+# (docs/eidos-review.md section 2).
+#
+# A literal that equals a function entry is code, not data: matched C passes
+# overlay callbacks by address (`(WMCallbackFunc)0x021D2AA8` in
+# ov016/dwc_mov_wh.c) and compares a stored function pointer with one
+# (`tickFn == 0x021CDC0D` in ov093/btl_client.c). Behind a cast or a
+# comparison it becomes the native function: by name through an assembler
+# label, or, for a file-static function, through a global alias appended to
+# the same TU.
+MAIN_LITERAL = re.compile(r"(?<![\w.])0x02([0-9A-Fa-f]{6})[uUlL]*(?![\w])")
+POINTER_CAST_BEFORE = re.compile(r"\(\s*[A-Za-z_][\w\s]*(?:\*\s*(?:const\s*)?)+\)\s*\(?\s*$")
+ANY_CAST_BEFORE = re.compile(r"\)\s*\(?\s*$")
+COMPARE_BEFORE = re.compile(r"[!=]=\s*\(?\s*$")
+DATA_ROW = re.compile(r"\*\s+([A-Za-z_]\w*)\s+0x([0-9A-Fa-f]{8})\s+data")
+OVERLAY_ID = re.compile(r"\b(ov\d+_id)\b(?!\s*\[\s*\])")
+# ov010/scrcmd_symbol.c:292 builds the name by pasting:
+# `#define FS_OVERLAY_ID(name) ((uptr)name##_id)`, used as FS_OVERLAY_ID(ov098).
+PASTED_OVERLAY_ID = re.compile(r"\bFS_OVERLAY_ID\s*\(\s*(ov\d+)\s*\)")
+# Absolute linker symbols below this are values (ids, stack sizes), not
+# addresses: the lowest DS address in any header row is ITCM, 0x01FF8000.
+LINKER_CONSTANT_LIMIT = 0x10000
+
+
+def overlay_namespaces(function_rows):
+    """Map (region, name) -> port name for functions defined in several regions.
+
+    ov117 and ov118 each carry their own pokemontrade_demo_common.c with the
+    same eleven external names; the DS linker kept them apart because each
+    overlay was linked alone. The first region (in sort order) keeps the name,
+    every later one gets `<region>_<name>`. `function_rows` yields
+    (region, name, is_static).
+    """
+    regions = {}
+    for region, name, is_static in function_rows:
+        if not is_static:
+            regions.setdefault(name, set()).add(module_of(region))
+    renamed = {}
+    for name, found in regions.items():
+        for region in sorted(found)[1:]:
+            renamed[(region, name)] = "%s_%s" % (region, name)
+    return renamed
+
+
+def flat_address(value):
+    """Port expression for DS main-RAM address `value` in the flat image."""
+    return "((unsigned int)NitroPort_MainMem + 0x%06X)" % (value & 0x7FFFFF)
+
+
+def module_of(relative):
+    """Module key of a `src/game/`-relative path, as function_addrs.tsv names it."""
+    top = relative.split("/")[0]
+    return "arm9" if top in ("arm9", "arm9_autoload0_ITCM") else top
+
+
+class SourceIndex:
+    """Facts about the whole Aletheia tree that the per-file rewrites need."""
+
+    def __init__(self, source_root):
+        self.header_macros = header_shared_macros(source_root)
+        self.functions = {}
+        table = source_root.parent.parent / "layout" / "function_addrs.tsv"
+        function_rows = []
+        for row in table.read_text(encoding="utf-8").splitlines()[1:]:
+            region, address, name, isa, _size, source, static = row.split("\t")
+            key = module_of(region)
+            value = int(address, 16) | (1 if isa == "thumb" else 0)
+            self.functions.setdefault(key, {})[value] = (name, static == "yes", source)
+            function_rows.append((region, name, static == "yes"))
+        self.namespaces = overlay_namespaces(function_rows)
+        addresses = {}
+        constants = {}
+        for path in source_root.rglob("*"):
+            if path.suffix not in (".c", ".h"):
+                continue
+            text = path.read_text(encoding="utf-8", errors="replace")
+            for name, value in DATA_ROW.findall(text):
+                value = int(value, 16)
+                if value < LINKER_CONSTANT_LIMIT:
+                    constants.setdefault(name, set()).add(value)
+                elif value >= 0x02000000:
+                    addresses.setdefault(name, set()).add(value)
+        # name -> value, or None when files disagree (ov_id is 67 in one file
+        # and 114 in another); a file's own row then decides.
+        self.constants = {name: (min(values) if len(values) == 1 else None)
+                          for name, values in constants.items()}
+        self.constant_use = (re.compile(r"\b(%s)\b(?!\s*\[\s*\])"
+                                        % "|".join(sorted(map(re.escape, self.constants),
+                                                          key=len, reverse=True)))
+                             if self.constants else None)
+        self.multi = {name for name, values in addresses.items() if len(values) > 1}
+
+    def function_at(self, relative, value):
+        """(name, is_static, source) for an exact function entry, or None."""
+        region = module_of(relative)
+        found = self.functions.get(region, {}).get(value)
+        if found is None:
+            region = "arm9"
+            found = self.functions.get(region, {}).get(value)
+        if found is None:
+            return None
+        name, is_static, source = found
+        return self.namespaces.get((region, name), name), is_static, source
+
+
+def static_alias(relative, name):
+    """Global alias name for a file-static function named by DS address."""
+    return "unowa_static_%s_%s" % (re.sub(r"\W", "_", relative[:-2]), name)
+
+
+def rewrite_main_ram(text, relative, index):
+    """Redirect main-RAM address literals in code. Returns (text, count)."""
+    pieces = []
+    count = 0
+    last = 0
+    references = {}
+    aliases = {}
+
+    def replace(match, code):
+        nonlocal count
+        value = int("02" + match.group(1), 16)
+        before = code[max(0, match.start() - 80):match.start()]
+        function = index.function_at(relative, value)
+        if function is not None and (ANY_CAST_BEFORE.search(before)
+                                     or COMPARE_BEFORE.search(before)):
+            name, is_static, source = function
+            symbol = name
+            if is_static:
+                if source != "src/game/" + relative:
+                    raise SystemExit("%s: literal 0x%08X names static %s of %s"
+                                     % (relative, value, name, source))
+                symbol = static_alias(relative, name)
+                aliases[symbol] = name
+            reference = "unowa_fnref_%s" % symbol
+            references[reference] = symbol
+            count += 1
+            return "((unsigned int)%s)" % reference
+        if POINTER_CAST_BEFORE.search(before):
+            count += 1
+            return flat_address(value)
+        return match.group(0)
+
+    for start, end in code_spans(text):
+        pieces.append(text[last:start])
+        code = text[start:end]
+        pieces.append(MAIN_LITERAL.sub(lambda m, code=code: replace(m, code), code))
+        last = end
+    text = "".join(pieces)
+    if references:
+        head = "".join("extern char %s[] __asm__(\"%s\");  /* port: DS code address */\n"
+                       % (reference, symbol)
+                       for reference, symbol in sorted(references.items()))
+        text = head + text
+    for symbol, name in sorted(aliases.items()):
+        text += ("\n/* port: a literal above names this static function by DS address */\n"
+                 "extern __typeof__(%s) %s __attribute__((alias(\"%s\")));\n"
+                 % (name, symbol, name))
+    return text, count
+
+
+def namespace_functions(text, relative, index):
+    """Give this file's overlay its own copy of a name another overlay defines.
+
+    See overlay_namespaces. The definitions and every caller in the overlay
+    see the same macro, so the overlay links to its own copy.
+    """
+    region = module_of(relative)
+    code = "".join(text[start:end] for start, end in code_spans(text))
+    lines = ["#define %s %s" % (name, renamed)
+             for (owner, name), renamed in sorted(index.namespaces.items())
+             if owner == region and re.search(r"\b%s\b" % re.escape(name), code)]
+    if not lines:
+        return text, 0
+    block = ("/* port: overlay namespace, see tools/patch_sources.py overlay_namespaces */\n"
+             + "\n".join(lines) + "\n")
+    return block + text, len(lines)
+
+
+def bind_file_names(text, index):
+    """Bind names that differ between files to this file's own address.
+
+    `sVramBanks` is 0x021BBA5C in ov109/idle_screen.c and 0x021DEB20 in
+    ov171/dendou_view.c. tools/gen_flat_image.py emits one linker name per
+    address; this maps the name to the one the file's header row gives.
+    """
+    rows = {}
+    for name, value in DATA_ROW.findall(text):
+        if name in index.multi:
+            rows.setdefault(name, set()).add(int(value, 16))
+    lines = []
+    for name in sorted(rows):
+        if len(rows[name]) != 1:
+            raise SystemExit("one file gives %s two addresses" % name)
+        if re.search(r"#[ \t]*define[ \t]+%s\b" % re.escape(name), text):
+            continue
+        lines.append("#define %s %s__ds_%08X" % (name, name, rows[name].pop()))
+    if not lines:
+        return text, 0
+    # At the top: a binding must precede every declaration and use, and some
+    # files declare their externs above a later #include (ov070/itemmenu.c).
+    block = ("/* port: names bound per file, see tools/gen_flat_image.py */\n"
+             + "\n".join(lines) + "\n")
+    return block + text, len(lines)
+
+
+def inline_linker_constants(text, index):
+    """Replace each use of a small absolute linker symbol with its value.
+
+    Overlay ids and stack sizes are absolute linker symbols (ov020_id is 0x14,
+    src/matched/ov/ov010_func_0215FA00.c:13; also `ov_id_0A`, `abs_id_14`,
+    `SDK_OVERLAY_ov021_ID`), declared `name[]` and passed as `(uptr)name`.
+    GNU ld relocates that with R_ARM_ABS32 against the ABS symbol, and 3dsxtool
+    refuses a target below the image base ("Relocation to invalid address").
+    The value comes from the file's own header row when it has one, then from
+    the tree; an `ovNNN_id` with no row is overlay NNN (every row agrees:
+    ov020_id 0x14, ov088_id 0x58, ov179_id 0xB3). Declarators stay.
+    """
+    own = {name: int(value, 16) for name, value in DATA_ROW.findall(text)
+           if int(value, 16) < LINKER_CONSTANT_LIMIT}
+    count = 0
+    pieces = []
+    last = 0
+
+    def value_of(name):
+        if name in own:
+            return own[name]
+        value = index.constants.get(name)
+        if value is not None:
+            return value
+        if OVERLAY_ID.fullmatch(name):
+            return int(name[2:-3], 10)
+        raise SystemExit("no single value for linker constant %s" % name)
+
+    def rewrite(code, pattern):
+        """Substitute uses in `code`; an `extern` declarator keeps its name and a
+        `&name` (ov215/egg_demo_main.c declares one as plain `char`) is the
+        same value: the symbol's address is the constant."""
+        nonlocal count
+        out = []
+        last = 0
+        for match in pattern.finditer(code):
+            name = match.group(1)
+            if pattern is OVERLAY_ID and name in index.constants:
+                continue
+            statement = code[max(code.rfind(";", 0, match.start()),
+                                 code.rfind("{", 0, match.start()),
+                                 code.rfind("}", 0, match.start())) + 1:match.start()]
+            if re.match(r"\s*(?:#[^\n]*\n\s*)*extern\b", statement):
+                continue
+            start = match.start()
+            ampersand = re.search(r"&\s*$", code[last:start])
+            if ampersand is not None:
+                start = last + ampersand.start()
+            out.append(code[last:start])
+            out.append("((unsigned char *)0x%X)" % value_of(name))
+            count += 1
+            last = match.end()
+        out.append(code[last:])
+        return "".join(out)
+
+    def pasted(match):
+        nonlocal count
+        count += 1
+        return "((uptr)((unsigned char *)0x%X))" % value_of(match.group(1) + "_id")
+
+    for start, end in code_spans(text):
+        pieces.append(text[last:start])
+        code = text[start:end]
+        if index.constant_use is not None:
+            code = rewrite(code, index.constant_use)
+        code = rewrite(code, OVERLAY_ID)
+        code = PASTED_OVERLAY_ID.sub(pasted, code)
+        pieces.append(code)
+        last = end
+    return "".join(pieces), count
+
+
 def remove_asm_body(text, name):
     """Remove one `asm TYPE name(...) { ... }` definition from the text."""
     head = re.compile(r"asm\s+[A-Za-z_]\w*\s+" + re.escape(name) +
@@ -199,7 +478,7 @@ def remove_asm_body(text, name):
         count += 1
 
 
-def patch_text(text, removed=(), fixups=(), header_macros=None):
+def patch_text(text, relative, removed=(), fixups=(), index=None):
     """Return the rewritten text and a count of applied rewrites."""
     text, count = CLZ.subn(lambda m: "%s = __builtin_clzl(%s);" % (m.group(1), m.group(1)), text)
     for name in removed:
@@ -219,9 +498,19 @@ def patch_text(text, removed=(), fixups=(), header_macros=None):
                                  % (name, expected, old, found))
             text = text.replace(old, new)
             count += found
-    if header_macros is not None:
-        text, n = rewrite_shared_area(text, header_macros)
+    if index is not None:
+        text, n = inline_linker_constants(text, index)
         count += n
+        text, n = bind_file_names(text, index)
+        count += n
+        text, n = namespace_functions(text, relative, index)
+        count += n
+        text, shared = rewrite_shared_area(text, index.header_macros)
+        count += shared
+        text, n = rewrite_main_ram(text, relative, index)
+        count += n
+        if n and not shared:
+            text = SHARED_DECL + text
     return text, count
 
 
@@ -235,18 +524,19 @@ def main():
                              "definition is supplied by the port")
     parser.add_argument("--fixup", action="append", default=[],
                         help="apply a named DS-hardware fixup from PORT_FIXUPS")
-    parser.add_argument("--list-shared", action="store_true",
-                        help="print every .c under --source that names the DS "
-                             "shared area, and exit")
+    parser.add_argument("--list", action="store_true",
+                        help="print every .c under --source that the port-wide "
+                             "rewrites change, and exit")
     parser.add_argument("files", nargs="*")
     args = parser.parse_args()
 
-    header_macros = header_shared_macros(args.source)
-    if args.list_shared:
-        for path in sorted(args.source.rglob("*.c")):
+    index = SourceIndex(args.source)
+    if args.list:
+        for path in sorted(args.source.glob("*/*.c")):
+            relative = path.relative_to(args.source).as_posix()
             text = path.read_text(encoding="utf-8", errors="replace")
-            if rewrite_shared_area(text, header_macros)[1]:
-                print(path.relative_to(args.source).as_posix())
+            if patch_text(text, relative, index=index)[1]:
+                print(relative)
         return
     if not args.files or args.out is None:
         parser.error("--out and at least one file are required")
@@ -254,7 +544,7 @@ def main():
     for name in args.files:
         source = args.source / name
         text = source.read_text(encoding="utf-8")
-        patched, count = patch_text(text, args.remove_asm, args.fixup, header_macros)
+        patched, count = patch_text(text, name, args.remove_asm, args.fixup, index)
         target = args.out / name
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(patched, encoding="utf-8", newline="\n")

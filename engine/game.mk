@@ -27,7 +27,7 @@ EXPECTED_SINJOH   := 1774be6
 BLACK_SHA1 := 26ad0b9967aa279c4a266ee69f52b9b2332399a5
 WHITE_SHA1 := bc696a0dfb448c7b3a8a206f0f8214411a039208
 
-.PHONY: verify-pins verify-rom lib data-image link-probe link-probe-real link-final clean
+.PHONY: verify-pins verify-rom lib link-final clean
 verify-pins:
 	@test "$$(git -C $(ALETHEIA_DIR) rev-parse --short=7 HEAD)" = "$(EXPECTED_ALETHEIA)" \
 	    || { echo "Aletheia checkout is not $(EXPECTED_ALETHEIA)"; exit 1; }
@@ -54,7 +54,6 @@ endif
 OUT := build/game/3ds
 LIB := $(OUT)/libunowa_game.a
 TOOLS := $(dir $(lastword $(MAKEFILE_LIST)))../tools
-DATA_IMAGE_PY := $(TOOLS)/gen_data_image.py
 
 # M2/M3 presentation. The M0 GPU renderer and its log/storage dependencies are
 # compiled with the root Makefile's ARM11 flags (see Makefile:58-68) and linked
@@ -62,7 +61,7 @@ DATA_IMAGE_PY := $(TOOLS)/gen_data_image.py
 # NitroPort_OnFrame in port_stubs.c presents one clear picture per V-blank. This
 # proves the frame loop reaches the display; the G2D/PICA game bridge is M3/M4.
 ENGINE_SRCS := engine/graphics/renderer.c engine/diagnostics/log.c \
-               engine/storage/paths.c
+               engine/storage/paths.c engine/runtime/unowa_edition.c
 ENGINE_OBJS := $(patsubst %.c,$(OUT)/obj/%.o,$(ENGINE_SRCS))
 ENGINE_CFLAGS := -std=gnu11 -O2 -g -Wall -Wextra -Wno-unused-parameter \
                  -ffunction-sections -fdata-sections -march=armv6k -mtune=mpcore \
@@ -85,12 +84,12 @@ DEPS     := $(GAME_OBJS:.o=.d)
 PATCHED := ov009/wcm_wmif.c ov013/vct_audio.c twl/nwmif.c \
            twl/dsp_pipe.c arm9/scfg_proc.c ov094/btlv_input.c \
            ov119/pokemontrade_2d.c twl/pm.c arm9/gf_overlay.c \
-           ov010/event_wifi_proc.c
-# Every compiled TU that names the DS shared work area (0x02FFFxxx/0x027FFxxx)
-# is patched too: tools/patch_sources.py redirects those literals to sinjoh's
-# shadow at NitroPort_MainMem + 0x7FF000 (see SHARED_LITERAL there).
-SHARED_SRCS := $(shell python3 tools/patch_sources.py --source $(GAME) --list-shared)
-PATCHED += $(filter $(patsubst $(GAME)/%,%,$(GAME_SRCS)),$(SHARED_SRCS))
+           ov016/sceneoptmovconfirm.c ov016/sceneoptmovconfirm1.c
+# Every compiled TU the port-wide rewrites change is patched too: DS main-RAM
+# and shared-area address literals into the flat image, code addresses into
+# native functions, per-file data names and overlay ids (tools/patch_sources.py).
+PORT_SRCS := $(shell python3 tools/patch_sources.py --source $(GAME) --list)
+PATCHED += $(filter $(patsubst $(GAME)/%,%,$(GAME_SRCS)),$(PORT_SRCS))
 PATCHED := $(sort $(PATCHED))
 PATCHED_OBJS := $(patsubst %.c,$(OUT)/obj/%.o,$(PATCHED))
 NORMAL_OBJS  := $(filter-out $(PATCHED_OBJS),$(GAME_OBJS))
@@ -105,8 +104,8 @@ GV_SRCS   := $(strip $(shell grep -v '^#' $(dir $(lastword $(MAKEFILE_LIST)))gv_
 GV_OBJS   := $(patsubst %.c,$(OUT)/gv_raw/%.o,$(GV_SRCS))
 # biginteger.c is C apart from three Metrowerks limb readers, which the port
 # supplies in engine/stubs/port_stubs.c. Remove those asm bodies at build time.
-GV_PATCHED := ov009/biginteger.c arm9/pm.c arm9/os_alloc.c
-GV_PATCHED += $(filter $(GV_SRCS),$(SHARED_SRCS))
+GV_PATCHED := ov009/biginteger.c arm9/pm.c
+GV_PATCHED += $(filter $(GV_SRCS),$(PORT_SRCS))
 GV_PATCHED := $(sort $(GV_PATCHED))
 GV_PATCHED_OBJS := $(patsubst %.c,$(OUT)/gv_raw/%.o,$(GV_PATCHED))
 GV_RAW_OBJS := $(filter-out $(GV_PATCHED_OBJS),$(GV_OBJS))
@@ -153,26 +152,12 @@ AR := $(DEVKITARM)/bin/arm-none-eabi-gcc-ar
 
 lib: $(LIB)
 
-# DS data symbols live in the player's ROM, not in Aletheia's source. The
-# generator reads the addresses from Aletheia's own headers and the bytes from
-# its extracted region images; the output stays in the gitignored build tree.
-data-image: $(OUT)/gen/ds_data.o
-
 $(PORT_IOREG_H): $(GAME)/sdk_ioreg.h tools/gen_port_ioreg_header.py
 	@mkdir -p $(dir $@)
 	@python3 tools/gen_port_ioreg_header.py --source $(GAME) --out $@
 
-$(OUT)/gen/ds_data.o: $(OUT)/probe-undefined.txt $(DATA_IMAGE_PY)
-	@mkdir -p $(dir $@)
-	@python3 $(DATA_IMAGE_PY) --aletheia $(ALETHEIA_DIR) \
-	    --undefined $< --out $(OUT)/gen/ds_data.c \
-	    --reloc-name unowa_ds_relocate
-	@$(DEVKITARM)/bin/arm-none-eabi-gcc $(PORT_CFLAGS) -Wno-unused-const-variable \
-	    -c $(OUT)/gen/ds_data.c -o $@
-
 # Sinjoh's geometry interpreter is game-agnostic DS hardware work and supplies
-# the NitroPort_Gx* hooks the game calls. Its renderer-side kj_ctr_* callbacks
-# are not linked yet; they are counted among the remaining undefined symbols.
+# the NitroPort_Gx* hooks the game calls.
 $(OUT)/gen/kj_g3.o: $(SINJOH_DIR)/engine/runtime/kj_g3.c
 	@mkdir -p $(dir $@)
 	@$(DEVKITARM)/bin/arm-none-eabi-gcc $(PORT_CFLAGS) -DHGSS_PROFILE_OFF \
@@ -180,98 +165,89 @@ $(OUT)/gen/kj_g3.o: $(SINJOH_DIR)/engine/runtime/kj_g3.c
 	    -I$(NITRO)/build/3ds/gen -I$(SDK)/include \
 	    -c $< -o $@
 
-# Whole-archive merge with sinjoh's compat libraries. This is a link *probe*:
-# it first reports undefined symbols, generates the ROM-backed data image for
-# the data ones, then reports what a real link would still have to supply.
-$(OUT)/probe-undefined.txt: $(LIB)
-	@mkdir -p $(dir $@)
-	@$(DEVKITARM)/bin/arm-none-eabi-ld -r -o $(OUT)/probe-combined.o \
-	    --whole-archive $(LIB) \
-	    $(NITRO)/build/3ds/libnitro.a \
-	    $(NNS)/build/3ds/libnitrosystem.a --no-whole-archive
-	@$(DEVKITARM)/bin/arm-none-eabi-nm $(OUT)/probe-combined.o \
-	    | awk '$$1 == "U" { print $$2 }' > $@
-
-link-probe: $(OUT)/probe-undefined.txt
-	@mkdir -p $(OUT)/gen
-	@echo "undefined before ROM data image: $$(wc -l < $(OUT)/probe-undefined.txt)"
-	@$(MAKE) --no-print-directory -f engine/game.mk TARGET=$(TARGET) data-image
-	@$(MAKE) --no-print-directory -f engine/game.mk TARGET=$(TARGET) $(OUT)/gen/kj_g3.o
-	@$(DEVKITARM)/bin/arm-none-eabi-ld -r -o $(OUT)/probe-combined2.o \
-	    --whole-archive $(LIB) \
-	    $(NITRO)/build/3ds/libnitro.a \
-	    $(NNS)/build/3ds/libnitrosystem.a --no-whole-archive \
-	    $(OUT)/gen/ds_data.o $(OUT)/gen/kj_g3.o
-	@echo "undefined after ROM data image (whole-archive, conservative):"
-	@$(DEVKITARM)/bin/arm-none-eabi-nm $(OUT)/probe-combined2.o | grep -c ' U '
-
-# A normal link only pulls archive members that resolve a reference. A tiny
-# root object calling NitroMain gives a closer estimate of what the final
-# .3dsx link would still need. The two archives are in a linker group because
-# the game and the Gen V SDK call into each other.
+# The rename step (below) needs a root object that calls NitroMain.
 $(OUT)/gen/m1_entry.o:
 	@mkdir -p $(dir $@)
 	@printf 'extern void NitroMain(void);\nvoid m1_entry(void) { NitroMain(); }\n' > $(OUT)/gen/m1_entry.c
 	@$(DEVKITARM)/bin/arm-none-eabi-gcc $(PORT_CFLAGS) -c $(OUT)/gen/m1_entry.c -o $@
 
-$(OUT)/probe-gv-undefined.txt: $(REN_DIR)/renamed.stamp
-	@$(DEVKITARM)/bin/arm-none-eabi-ld -r -o $(OUT)/probe-gv.o \
-	    $(REN_DIR)/m1_entry.o --start-group $(GAME_REN) $(GV_LIB) \
-	    $(NITRO)/build/3ds/libnitro.a \
-	    $(NNS)/build/3ds/libnitrosystem.a --end-group \
-	    $(REN_DIR)/kj_g3.o $(REN_DIR)/port_stubs.o
-	@$(DEVKITARM)/bin/arm-none-eabi-nm $(OUT)/probe-gv.o \
-	    | awk '$$1 == "U" { print $$2 }' > $@
+# The flat DS main-RAM image (tools/gen_flat_image.py, engine/runtime/
+# flat_memory.h). The generator needs every name the other link inputs define:
+# a ROM pointer to a function, or to data the port defines natively, is
+# rewritten to that native symbol. Its output is derived from the player's ROM
+# and stays in the gitignored build tree.
+FLAT_DIR := $(OUT)/gen/flat
+FLAT_PY  := tools/gen_flat_image.py
+FLAT_OBJS := $(FLAT_DIR)/flat_image.o $(OUT)/obj/engine/runtime/flat_memory.o \
+             $(OUT)/obj/engine/runtime/ds_boot.o
+FLAT_LD  := $(FLAT_DIR)/flat_names.ld
 
-# The Gen V objects introduce data references the game-only probe never saw.
-# Extend the full data image with definitions for those additional symbols.
-$(OUT)/gen/ds_data_gv.o: $(OUT)/probe-gv-undefined.txt $(OUT)/probe-undefined.txt $(DATA_IMAGE_PY)
+# DS wireless and DSi-only entry points; see the file's header comment and
+# docs/status.md "Wireless stubs".
+WIRELESS_OBJ := $(OUT)/obj/engine/stubs/wireless_stubs.o
+
+$(WIRELESS_OBJ): engine/stubs/wireless_stubs.c
 	@mkdir -p $(dir $@)
-	@LC_ALL=C sort $(OUT)/probe-undefined.txt > $(OUT)/u-base.sorted
-	@LC_ALL=C sort $< > $(OUT)/u-gv.sorted
-	@LC_ALL=C comm -13 $(OUT)/u-base.sorted $(OUT)/u-gv.sorted > $(OUT)/u-gv-extra.txt
-	@python3 $(DATA_IMAGE_PY) --aletheia $(ALETHEIA_DIR) \
-	    --undefined $(OUT)/u-gv-extra.txt --out $(OUT)/gen/ds_data_gv.c \
-	    --reloc-name unowa_gv_relocate
-	@$(DEVKITARM)/bin/arm-none-eabi-gcc $(PORT_CFLAGS) -Wno-unused-const-variable \
-	    -c $(OUT)/gen/ds_data_gv.c -o $@
+	@$(DEVKITARM)/bin/arm-none-eabi-gcc $(PORT_CFLAGS) -Wextra $(SDK_INCLUDES) -c $< -o $@
 
-link-probe-real: $(OUT)/probe-gv-undefined.txt $(OUT)/gen/ds_data.o $(OUT)/gen/ds_data_gv.o
-	@$(DEVKITARM)/bin/arm-none-eabi-ld -r -o $(OUT)/probe-real.o \
-	    $(REN_DIR)/m1_entry.o --start-group $(GAME_REN) $(GV_LIB) \
-	    $(NITRO)/build/3ds/libnitro.a \
-	    $(NNS)/build/3ds/libnitrosystem.a --end-group \
-	    $(OUT)/gen/ds_data.o $(OUT)/gen/ds_data_gv.o $(REN_DIR)/kj_g3.o \
-	    $(REN_DIR)/port_stubs.o
-	@echo "undefined after normal-archive link:"
-	@$(DEVKITARM)/bin/arm-none-eabi-nm $(OUT)/probe-real.o | grep -c ' U '
+$(FLAT_DIR)/native.txt: $(REN_DIR)/renamed.stamp $(OUT)/gen/card_backup_port.o $(ENGINE_OBJS) \
+                        $(WIRELESS_OBJ)
+	@mkdir -p $(dir $@)
+	@$(DEVKITARM)/bin/arm-none-eabi-nm --defined-only $(GAME_REN) $(GV_LIB) \
+	    $(NITRO)/build/3ds/libnitro.a $(NNS)/build/3ds/libnitrosystem.a \
+	    $(REN_DIR)/kj_g3.o $(REN_DIR)/port_stubs.o $(OUT)/gen/card_backup_port.o \
+	    $(ENGINE_OBJS) $(WIRELESS_OBJ) 2>/dev/null \
+	    | awk 'NF == 3 && $$2 ~ /^[TDBRWV]$$/ { print $$3 }' | LC_ALL=C sort -u > $@
 
-# Final link test: a real ARM11 ELF and .3dsx using devkitPro's runtime.
-# This is the same library set as the M0 build plus the game closure.
+$(FLAT_DIR)/flat_image.c $(FLAT_LD) &: $(FLAT_DIR)/native.txt $(FLAT_PY) tools/gen_port_ioreg_header.py \
+                                       engine/game_blocklist.txt engine/game_overlay_blocklist.txt
+	@python3 $(FLAT_PY) --aletheia $(ALETHEIA_DIR) --native $< --out-dir $(FLAT_DIR)
+
+$(FLAT_DIR)/flat_image.o: $(FLAT_DIR)/flat_image.c engine/runtime/flat_memory.h
+	@$(DEVKITARM)/bin/arm-none-eabi-gcc $(PORT_CFLAGS) -Iengine -c $< -o $@
+
+$(OUT)/obj/engine/runtime/flat_memory.o: engine/runtime/flat_memory.c engine/runtime/flat_memory.h
+	@mkdir -p $(dir $@)
+	@$(DEVKITARM)/bin/arm-none-eabi-gcc $(PORT_CFLAGS) -Wextra -Iengine $(SDK_INCLUDES) \
+	    -c $< -o $@
+
+$(OUT)/obj/engine/runtime/ds_boot.o: engine/runtime/ds_boot.c
+	@mkdir -p $(dir $@)
+	@$(DEVKITARM)/bin/arm-none-eabi-gcc $(PORT_CFLAGS) -Wextra $(SDK_INCLUDES) -c $< -o $@
+
+# The test entry. Built with the game's flags: it calls into the game.
+$(OUT)/obj/engine/app/game_main.o: engine/app/game_main.c engine/runtime/flat_memory.h
+	@mkdir -p $(dir $@)
+	@$(DEVKITARM)/bin/arm-none-eabi-gcc $(PORT_CFLAGS) -Wextra -Iengine -c $< -o $@
+
+# Final link: a real ARM11 ELF and .3dsx using devkitPro's runtime.
 $(OUT)/obj/engine/%.o: engine/%.c
 	@mkdir -p $(dir $@)
 	@$(DEVKITARM)/bin/arm-none-eabi-gcc $(ENGINE_CFLAGS) -c $< -o $@
 
-$(OUT)/gen/m1_main.o:
-	@mkdir -p $(dir $@)
-	@printf 'typedef unsigned int u32;\ntypedef int BOOL;\nextern void NitroMain(void);\nextern void NitroPort_InitArm7Services(void);\nextern void NitroPort_SetArm7Handler(int tag, void (*handler)(int, u32, BOOL));\nextern void unowa_handle_nvram(int tag, u32 data, BOOL err);\nextern const char *kj_ds_open_pack(const char *pak, const char *manifest);\nextern void kj_log(const char *fmt, ...);\nextern void gfxInitDefault(void);\nextern int unowa_renderer_init(void);\nextern void unowa_ds_relocate(void);\nextern void unowa_gv_relocate(void);\nextern void *unowa_paths_init(void);\nint main(void) { gfxInitDefault(); unowa_paths_init(); if (!unowa_renderer_init()) { return 1; } NitroPort_InitArm7Services(); NitroPort_SetArm7Handler(4, unowa_handle_nvram); unowa_ds_relocate(); unowa_gv_relocate(); const char *e = kj_ds_open_pack("sdmc:/3ds/unowa/data/black.pak", "sdmc:/3ds/unowa/data/black.manifest.json"); if (e) { kj_log("[pack] %%s", e); return 2; } NitroMain(); return 0; }\n' > $(OUT)/gen/m1_main.c
-	@$(DEVKITARM)/bin/arm-none-eabi-gcc $(PORT_CFLAGS) -c $(OUT)/gen/m1_main.c -o $@
+# This build reads the Black extract and opens black.pak (engine/app/game_main.c).
+$(OUT)/obj/engine/runtime/unowa_edition.o: ENGINE_CFLAGS += -DUNOWA_EDITION=0
 
-$(OUT)/m1-test.elf: $(OUT)/gen/m1_main.o $(OUT)/probe-gv-undefined.txt \
-                    $(OUT)/gen/ds_data.o $(OUT)/gen/ds_data_gv.o $(ENGINE_OBJS) \
-                    $(OUT)/gen/card_backup_port.o
+# --wrap: engine/runtime/flat_memory.c replaces sinjoh's overlay seams and
+# moves the main arena above the DS image; see its header comment.
+FLAT_WRAPS := -Wl,--wrap=NitroPort_OverlayInfo -Wl,--wrap=NitroPort_OverlayLoadImage \
+              -Wl,--wrap=NitroPort_OverlayClearBss -Wl,--wrap=OS_InitArena
+
+$(OUT)/m1-test.elf: $(OUT)/obj/engine/app/game_main.o $(REN_DIR)/renamed.stamp \
+                    $(FLAT_OBJS) $(FLAT_LD) $(ENGINE_OBJS) $(OUT)/gen/card_backup_port.o \
+                    $(WIRELESS_OBJ)
 	@$(DEVKITARM)/bin/arm-none-eabi-gcc -march=armv6k -mtune=mpcore \
 	    -mfpu=vfp -mfloat-abi=hard -mtp=soft -mword-relocations \
 	    -fno-short-enums -D__3DS__ -specs=3dsx.specs \
 	    -L$(DEVKITPRO)/libctru/lib -Wl,--gc-sections \
 	    -Wl,--no-enum-size-warning -Wl,--wrap=NitroPort_Unimplemented \
-	    -Wl,--wrap=OS_Terminate \
+	    -Wl,--wrap=OS_Terminate $(FLAT_WRAPS) \
 	    -Wl,--start-group $< $(OUT)/gen/card_backup_port.o $(GAME_REN) $(GV_LIB) \
 	    $(NITRO)/build/3ds/libnitro.a \
 	    $(NNS)/build/3ds/libnitrosystem.a \
-	    $(OUT)/gen/ds_data.o $(OUT)/gen/ds_data_gv.o $(REN_DIR)/kj_g3.o \
-	    $(REN_DIR)/port_stubs.o $(ENGINE_OBJS) -Wl,--end-group \
-	    -lcitro3d -lctru -lm -o $@
+	    $(FLAT_OBJS) $(REN_DIR)/kj_g3.o \
+	    $(REN_DIR)/port_stubs.o $(ENGINE_OBJS) $(WIRELESS_OBJ) -Wl,--end-group \
+	    -lcitro3d -lctru -lm $(FLAT_LD) -o $@
 
 $(OUT)/m1-test.3dsx: $(OUT)/m1-test.elf
 	@$(DEVKITPRO)/tools/bin/3dsxtool $< $@
@@ -313,6 +289,16 @@ $(OUT)/src/twl/pm.c: $(GAME)/twl/pm.c
 	@python3 tools/patch_sources.py --source $(GAME) --out $(OUT)/src \
 	    --fixup pm_ndma_case twl/pm.c
 
+$(OUT)/src/ov016/sceneoptmovconfirm.c: $(GAME)/ov016/sceneoptmovconfirm.c
+	@mkdir -p $(dir $@)
+	@python3 tools/patch_sources.py --source $(GAME) --out $(OUT)/src \
+	    --fixup ov016_split_unit_caller ov016/sceneoptmovconfirm.c
+
+$(OUT)/src/ov016/sceneoptmovconfirm1.c: $(GAME)/ov016/sceneoptmovconfirm1.c
+	@mkdir -p $(dir $@)
+	@python3 tools/patch_sources.py --source $(GAME) --out $(OUT)/src \
+	    --fixup ov016_split_unit_owner ov016/sceneoptmovconfirm1.c
+
 $(OUT)/src/ov094/btlv_input.c: $(GAME)/ov094/btlv_input.c
 	@mkdir -p $(dir $@)
 	@python3 tools/patch_sources.py --source $(GAME) --out $(OUT)/src \
@@ -322,12 +308,6 @@ $(OUT)/src/ov119/pokemontrade_2d.c: $(GAME)/ov119/pokemontrade_2d.c
 	@mkdir -p $(dir $@)
 	@python3 tools/patch_sources.py --source $(GAME) --out $(OUT)/src \
 	    --fixup vram_enum_base ov119/pokemontrade_2d.c
-
-# ov020_id is the absolute DS value 0x14; see PORT_FIXUPS.
-$(OUT)/src/ov010/event_wifi_proc.c: $(GAME)/ov010/event_wifi_proc.c
-	@mkdir -p $(dir $@)
-	@python3 tools/patch_sources.py --source $(GAME) --out $(OUT)/src \
-	    --fixup ov020_id_constant ov010/event_wifi_proc.c
 
 # A change to the patcher regenerates every patched copy.
 $(addprefix $(OUT)/src/,$(PATCHED)) $(addprefix $(OUT)/gv_src/,$(GV_PATCHED)): tools/patch_sources.py
@@ -369,12 +349,6 @@ $(OUT)/gv_src/arm9/pm.c: $(GAME)/arm9/pm.c
 	@mkdir -p $(dir $@)
 	@python3 tools/patch_sources.py --source $(GAME) --out $(OUT)/gv_src \
 	    --fixup pm_waitbusy_drain arm9/pm.c
-
-# The extra heap's raw DS main-RAM base is unmapped on ARM11.
-$(OUT)/gv_src/arm9/os_alloc.c: $(GAME)/arm9/os_alloc.c
-	@mkdir -p $(dir $@)
-	@python3 tools/patch_sources.py --source $(GAME) --out $(OUT)/gv_src \
-	    --fixup extra_heap_mainmem arm9/os_alloc.c
 
 $(GV_PATCHED_OBJS): $(OUT)/gv_raw/%.o: $(OUT)/gv_src/%.c | $(PORT_IOREG_H)
 	@mkdir -p $(dir $@)

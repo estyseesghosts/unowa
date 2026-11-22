@@ -54,10 +54,5 @@ ov186/br_res.c
 ov186/br_sidebar.c
 ov186/br_util.c
 
-# Duplicate object names at whole-archive link time. ov117 and ov118 both
-# ship pokemontrade_demo_common.c; the original linker kept them in separate
-# overlay namespaces. Keeping one copy until overlays are namespaced in M2.
-ov118/pokemontrade_demo_common.c
-
 # Defines CTRDG_IsAgbCartridge, which sinjoh's libnitro already provides.
 ov029/c_gear.c
