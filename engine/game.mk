@@ -57,11 +57,13 @@ TOOLS := $(dir $(lastword $(MAKEFILE_LIST)))../tools
 
 # M2/M3 presentation. The M0 GPU renderer and its log/storage dependencies are
 # compiled with the root Makefile's ARM11 flags (see Makefile:58-68) and linked
-# into the test ELF. The test entry initialises the renderer; the strong
-# NitroPort_OnFrame in port_stubs.c presents one clear picture per V-blank. This
+# into the test ELF. The test entry initialises the renderer and the V-blank
+# pacing clock; the strong NitroPort_OnFrame in port_stubs.c paces the game tick
+# once per V-blank and presents one clear picture every other V-blank. This
 # proves the frame loop reaches the display; the G2D/PICA game bridge is M3/M4.
 ENGINE_SRCS := engine/graphics/renderer.c engine/diagnostics/log.c \
-               engine/storage/paths.c engine/runtime/unowa_edition.c
+               engine/storage/paths.c engine/runtime/unowa_edition.c \
+               engine/runtime/frame_pacing.c
 ENGINE_OBJS := $(patsubst %.c,$(OUT)/obj/%.o,$(ENGINE_SRCS))
 ENGINE_CFLAGS := -std=gnu11 -O2 -g -Wall -Wextra -Wno-unused-parameter \
                  -ffunction-sections -fdata-sections -march=armv6k -mtune=mpcore \

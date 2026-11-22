@@ -53,10 +53,11 @@ bool unowa_renderer_init(void)
     C3D_RenderTargetSetOutput(s_top, GFX_TOP, GFX_LEFT, DISPLAY_TRANSFER_FLAGS);
     C3D_RenderTargetSetOutput(s_bottom, GFX_BOTTOM, GFX_LEFT, DISPLAY_TRANSFER_FLAGS);
 
-    /* 30 Hz presentation: C3D_FrameSync's per-screen accumulator advances the
-     * rate-limited counter every second V-blank (coffeepot frame-pacing.md,
-     * "Locking the frame rate"). Use divisors of 60: 30 is exact. */
-    C3D_FrameRate(30.0f);
+    /* Keep citro3d's frame counter at the physical 60 Hz display rate.
+     * unowa_frame_pacing uses C3D_FrameCounter(0) as the emulated V-blank
+     * clock, and C3D_FrameRate(30) would make it advance every second
+     * V-blank, halving the game tick (coffeepot frame-pacing.md, "Locking the
+     * frame rate"). Presentation is throttled to 30 Hz by the caller. */
 
     s_ready = true;
     kj_log("[gpu] targets ready (linear free %lu KiB, VRAM free %lu KiB)",
@@ -83,7 +84,11 @@ bool unowa_renderer_present(uint32_t top_color, uint32_t bottom_color)
     if (!s_ready) {
         return false;
     }
-    if (!C3D_FrameBegin(C3D_FRAME_SYNCDRAW)) {
+    /* No SYNCDRAW: waiting for the display here would slow the game tick.
+     * This only waits for the previous frame's GPU work (coffeepot
+     * frame-pacing.md, "The timing model"). Presentation is throttled to 30 Hz
+     * by the caller and may be skipped; the game tick is not. */
+    if (!C3D_FrameBegin(0)) {
         return false;
     }
     /* A target must be declared drawn this frame or citro3d does not transfer

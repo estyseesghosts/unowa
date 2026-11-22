@@ -530,8 +530,14 @@ enum {
  * PICA game bridge exists. The renderer is a clear-only path (renderer.c:1-8);
  * the alternating shades match the M0 loop (engine/app/main.c:108). The count
  * lets the emulator confirm NitroPort_OnFrame is reached without a screenshot.
+ * Presentation is throttled to 30 Hz and never blocks this V-blank: pacing is
+ * owned by engine/runtime/frame_pacing.c. Declarations are local because this
+ * translation unit uses the game's u32 (unsigned int) and cannot include the
+ * libctru headers; the ABI is identical for these fixed-width signatures.
  */
 extern int unowa_renderer_present(unsigned int top_color, unsigned int bottom_color);
+extern void unowa_frame_pacing_vblank(void);
+extern unsigned int unowa_pacing_vblanks;
 unsigned int unowa_present_count;
 
 /* The DS V-blank counter lives in the shared work area (HW_VBLANK_COUNT_BUF,
@@ -545,6 +551,11 @@ extern unsigned char NitroPort_MainMem[];
 
 void NitroPort_OnFrame(void)
 {
+    /* Pace the game tick to one DS V-blank per physical 3DS V-blank before
+     * reading input or presenting. Presentation is throttled to 30 Hz below
+     * and never waits for the display, so it cannot slow this tick. */
+    unowa_frame_pacing_vblank();
+
     hidScanInput();
     const unsigned int held = hidKeysHeld();
 
@@ -579,9 +590,12 @@ void NitroPort_OnFrame(void)
         NitroPort_SetTouch(0, 0, 0);
     }
 
+    /* Present every other DS V-blank (30 Hz) without blocking this one. */
     static const unsigned int s_shades[2] = { 0x101830FFu, 0x1B2A4AFFu };
-    unowa_renderer_present(s_shades[unowa_present_count & 1u], 0x181018FFu);
-    unowa_present_count++;
+    if ((unowa_pacing_vblanks & 1u) == 0u) {
+        unowa_renderer_present(s_shades[unowa_present_count & 1u], 0x181018FFu);
+        unowa_present_count++;
+    }
     UNOWA_VBLANK_COUNT++;
 }
 

@@ -16,9 +16,10 @@ bool unowa_renderer_init(void);
 
 void unowa_renderer_exit(void);
 
-/* Clear and submit one 30 Hz picture. Returns false if the GPU queue was not
- * ready and the picture had to be skipped (the game tick, when it exists, must
- * not be skipped with it). */
+/* Clear and submit one picture. Non-synchronising: this waits for the GPU
+ * queue, not for the display, so the caller's game tick is never slowed by
+ * presentation. Returns false if the queue was not ready and the picture had
+ * to be skipped (the game tick must not be skipped with it). */
 bool unowa_renderer_present(uint32_t top_color, uint32_t bottom_color);
 
 #endif

@@ -2,7 +2,8 @@
  * The game's 3DS entry point.
  *
  * Order matters:
- *   1. the M0 renderer and SD paths, so a failure can still be reported;
+ *   1. the M0 renderer and SD paths, so a failure can still be reported, and
+ *      the V-blank pacing clock that keeps the game tick at the display rate;
  *   2. sinjoh's virtual ARM7 services, plus the Gen V NVRAM handler (PXI tag
  *      4), before any game code issues a PXI request (kohjoh kj_boot.c:112);
  *   3. the flat DS main-RAM image, before any game code reads DS data;
@@ -13,6 +14,7 @@
  *   6. NitroMain, which does not return.
  */
 #include "runtime/flat_memory.h"
+#include "runtime/frame_pacing.h"
 
 #include <stddef.h>
 
@@ -41,6 +43,7 @@ int main(void)
     if (!unowa_renderer_init()) {
         return 1;
     }
+    unowa_frame_pacing_init();
     NitroPort_InitArm7Services();
     NitroPort_SetArm7Handler(NVRAM_PXI_TAG, unowa_handle_nvram);
     unowa_flat_boot();

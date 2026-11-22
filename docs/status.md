@@ -276,8 +276,9 @@ explicit failures for the unimplemented NVRAM ARM7 service, not silent hangs.
 The M0 renderer is wired into the M2 harness. `engine/game.mk` compiles
 `renderer.c`/`log.c`/`paths.c` with the root Makefile's ARM11 flags; the test
 entry calls `gfxInitDefault()` and `unowa_renderer_init()` before `NitroMain`,
-and the strong `NitroPort_OnFrame` calls `unowa_renderer_present()` on each
-emulated V-blank (counter `unowa_present_count`). This is the clear-only path
+and the strong `NitroPort_OnFrame` calls `unowa_renderer_present()` on every
+other emulated V-blank (counter `unowa_present_count`); "The frame bridge"
+below describes the pacing that owns the tick. This is the clear-only path
 from `renderer.c:1-8`, not the G2D/PICA game bridge: it proves the frame loop
 reaches the display, which is a prerequisite for M3/M4. LOTUS at 1800 frames:
 `last_error` empty, `unowa_present_count == 130`, top screen RGB (16,24,48)
@@ -536,14 +537,57 @@ does, right after the flat ARM9 load. It writes:
 - reset parameter 0.
 
 Verified in LOTUS: 1200 frames with no stop, no terminate and no
-unimplemented call. `unowa_present_count` is 587, since presentation is paced
-to 30 Hz (`renderer.c`, `C3D_FrameRate(30.0f)`). The overlay log shows 15
-runtime loads: 10, 11, 9, 13, 10, 11, 228, 13, 9, 10, 11, 13, 9, 10, 11.
+unimplemented call. The overlay log shows 15 runtime loads: 10, 11, 9, 13,
+10, 11, 228, 13, 9, 10, 11, 13, 9, 10, 11. At this commit presentation was
+paced by `C3D_FrameRate(30.0f)` and measured 587 presents; that also halved the
+game tick and is fixed in "The frame bridge" below.
 
 Still open: the owner settings are kohjoh's defaults ("Player", English,
 1 January; kohjoh `src/app/main.c:218-228`). Reading them from the 3DS system
 configuration needs a source for the CFG block layout, and coffeepot has no
 article on it yet.
+
+### The frame bridge
+
+The boot runs, but the game tick was paced by presentation. Black/White waits
+once per V-blank in its top-level loop (Aletheia `arm9/gfl_use.c:521`), and that
+wait reaches `NitroPort_OnFrame`. The M2 clear path called
+`C3D_FrameBegin(C3D_FRAME_SYNCDRAW)` under `C3D_FrameRate(30.0f)` there; the
+V-blank counter citro3d waits on advances every second V-blank at 30 Hz
+(coffeepot `ctr/engineering/PICA200/frame-pacing.md`, "Locking the frame rate"),
+so each game V-blank blocked for two physical ones. Measured in LOTUS at
+`1151656`: **635 game V-blanks over 1200 guest frames (~31.7 Hz)**, with the
+same 635 presents. That is half-speed gameplay, not a renderer fault.
+
+Pacing and presentation are now separate, following sinjoh's `kj_ctr_vblank`
+and `kj_frame.c` publish (reuse-audit.md, "Adapt, do not copy"):
+
+- `engine/runtime/frame_pacing.c` owns the emulated V-blank clock. It locks the
+  count to `C3D_FrameCounter(0)`, waits with `gspWaitForVBlank` when the game is
+  early, lets a late frame catch up instead of losing DS time against audio,
+  and resynchronises after a stall over 30 V-blanks. Coffeepot frame-pacing.md,
+  "Lock emulated V-blanks to the real counter" and "Catching up without a cap";
+  sinjoh `engine/app/main.c:39-46,96-135`.
+- `renderer.c` leaves the citro3d frame rate at 60 (so `C3D_FrameCounter(0)`
+  ticks every V-blank) and submits with `C3D_FrameBegin(0)`, which waits only
+  for GPU work, never for the display (coffeepot frame-pacing.md, "The timing
+  model").
+- `NitroPort_OnFrame` calls the pacing wait once, then presents every *other*
+  DS V-blank, so the picture is still 30 Hz while the game ticks at 60 Hz.
+  Skipping a picture never skips a tick (reuse-audit.md lesson 2).
+
+Verified in LOTUS, secondary session copied from the `unowa` card,
+1200 frames, no error: `unowa_pacing_vblanks == 1196`, the DS shared counter
+`NitroPort_MainMem+0x7FFC3C == 1196`, `unowa_present_count == 598`,
+`unowa_pacing_late_vblanks == 22`, `unowa_pacing_resyncs == 0`. Both screens
+still capture the expected navy/purple clears. The tick is ~59.8 Hz against
+LOTUS's 59.83 Hz guest refresh. Emulator evidence only; the display timing is
+unmeasured on Old 3DS.
+
+Still to do for M3: move the publish off `NitroPort_OnFrame` to the game's
+coherent frame boundary (the end of `GFL_USE_PostIrqUpdate`), so the renderer
+reads one consistent version of palettes, OAM and VRAM instead of whatever the
+last V-blank left.
 
 ### Wireless stubs
 
