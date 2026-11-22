@@ -584,10 +584,27 @@ still capture the expected navy/purple clears. The tick is ~59.8 Hz against
 LOTUS's 59.83 Hz guest refresh. Emulator evidence only; the display timing is
 unmeasured on Old 3DS.
 
-Still to do for M3: move the publish off `NitroPort_OnFrame` to the game's
-coherent frame boundary (the end of `GFL_USE_PostIrqUpdate`), so the renderer
-reads one consistent version of palettes, OAM and VRAM instead of whatever the
-last V-blank left.
+Still to do for M3: find the game's actual coherent frame boundary before
+moving the publish off `NitroPort_OnFrame`. The obvious candidate, the end of
+`GFL_USE_PostIrqUpdate` (Aletheia `arm9/gfl_use.c:582-586`), was tried with a
+build-time hook and **does not fire**: in LOTUS the DS V-blank counter reached
+2204 over 2208 frames, the overlay log stayed at 15 loads, but
+`unowa_present_count` stayed 0 and both screens went black. The game therefore
+reaches `OS_WaitIrq` (hence `NitroPort_OnFrame`) without reaching the
+`NitroMain` loop's `GFL_USE_PostIrqUpdate` call at this stage. Presentation was
+restored to `NitroPort_OnFrame`; the hook was removed. A real M3 bridge must
+identify the boundary the game actually uses, not assume the source-level loop
+is running.
+
+Source scan for other `OS_WaitIrq` loops that do **not** call
+`GFL_USE_PostIrqUpdate` (Aletheia `src/game/`): `UI_SoftReset` (`arm9/ui.c:917-931`
+spins on `GFL_NET_IsIdle`/`CARD_TryWaitBackupAsync`, which the port's stub always
+answers TRUE), `OS_WaitVBlankIntr` (`arm9/os_system.c:172-176`), `net_err.c`
+(lines 573, 879, 1095), and the idle-screen overlay (`ov109/idle_screen.c:118-122`).
+Overlay 109 was not in the 15 loaded at the stop, so these are candidates, not
+a diagnosis. DISPCNT in `NitroPort_IoReg` is still 0 and the palette/BG-VRAM
+shadows are empty, so the game has not configured 2D rendering yet; M3 cannot
+be demonstrated until that stall is located.
 
 ### Wireless stubs
 

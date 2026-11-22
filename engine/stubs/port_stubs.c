@@ -527,13 +527,13 @@ enum {
 };
 
 /* M2 presentation: prove the frame loop reaches the display before the G2D/
- * PICA game bridge exists. The renderer is a clear-only path (renderer.c:1-8);
- * the alternating shades match the M0 loop (engine/app/main.c:108). The count
- * lets the emulator confirm NitroPort_OnFrame is reached without a screenshot.
- * Presentation is throttled to 30 Hz and never blocks this V-blank: pacing is
- * owned by engine/runtime/frame_pacing.c. Declarations are local because this
- * translation unit uses the game's u32 (unsigned int) and cannot include the
- * libctru headers; the ABI is identical for these fixed-width signatures.
+ * PICA game bridge exists. The renderer is a clear-only path (renderer.c:1-8)
+ * with a steady clear colour. The count lets the emulator confirm the frame
+ * loop is reached without a screenshot.
+ * Pacing is owned by engine/runtime/frame_pacing.c; presentation is throttled
+ * to 30 Hz here. Declarations are local because this translation unit uses the
+ * game's u32 (unsigned int) and cannot include the libctru headers; the
+ * fixed-width ABI is identical.
  */
 extern int unowa_renderer_present(unsigned int top_color, unsigned int bottom_color);
 extern void unowa_frame_pacing_vblank(void);
@@ -590,10 +590,13 @@ void NitroPort_OnFrame(void)
         NitroPort_SetTouch(0, 0, 0);
     }
 
-    /* Present every other DS V-blank (30 Hz) without blocking this one. */
-    static const unsigned int s_shades[2] = { 0x101830FFu, 0x1B2A4AFFu };
+    /* Present every other DS V-blank (30 Hz) without blocking it. A steady
+     * clear colour: the alternating M0 diagnostic shades read as flicker in
+     * the windowed LOTUS view and serve no purpose now that presentation is
+     * verified. This is a clear-only path until the M2-to-M3 graphics bridge.
+     */
     if ((unowa_pacing_vblanks & 1u) == 0u) {
-        unowa_renderer_present(s_shades[unowa_present_count & 1u], 0x181018FFu);
+        unowa_renderer_present(0x101830FFu, 0x181018FFu);
         unowa_present_count++;
     }
     UNOWA_VBLANK_COUNT++;
