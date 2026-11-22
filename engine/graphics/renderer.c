@@ -1,37 +1,55 @@
 /*
- * renderer.c: M0 GPU-native presentation path for unowa.
+ * renderer.c: the 3DS side of the frame boundary.
  *
- * Created for unowa, modelled on sinjoh's pica/targets.c and renderer.c
- * (GPL-3.0, via kohjoh). This is intentionally only a clear path: it proves
- * the citro3d targets, 30 Hz pacing and frame submission work on the target
- * hardware. The tile atlas / retained G3D renderer is imported at M3/M4; a
- * software framebuffer is never added as a fallback.
+ * Frame ownership and pacing stay as the M0 renderer had them: one
+ * C3D_FrameBegin(0) submission per presented DS V-blank, never waiting for the
+ * display, and a skipped picture never skips the game tick (coffeepot
+ * ctr/engineering/PICA200/frame-pacing.md, "The timing model" and "Skip the
+ * picture, keep the tick").
  *
- * Render targets are the physical panel sizes (240x400 top, 240x320 bottom).
- * The logical screens are 400x240 and 320x240; the display transfer rotates
- * them. See coffeepot ctr/engineering/porting.md section 3.3 and
- * ctr/engineering/PICA200/frame-pacing.md.
+ * The picture itself is now sinjoh's DS 2D engine on the PICA
+ * (engine/graphics/g2d/g2d.c, GPL-3.0, sinjoh 1774be6). g2d translates one
+ * engine's registers, palettes, BG/OBJ VRAM and OAM per scanline span into
+ * ordered GPU passes; the tile atlas (engine/graphics/resources/atlas.c)
+ * turns DS tiles into GPU texels with exact-compare caching. unowa supplies
+ * the input (runtime/unowa_frame.c) and the targets (pica/targets.c).
+ *
+ * Scale is the DS picture at 1.25x: 256x192 -> 320x240. The top screen is
+ * 400 px wide, so the picture is centred with 40 px on each side (the same
+ * geometry sinjoh uses, targets.c:33-39). Those side bands stay black until
+ * M6 adds the wide art; g2d's wide path is compiled out by wideart_stub.c.
+ *
+ * A clear is still drawn when the game has not configured the 2D engine
+ * (DISPCNT == 0), so a boot failure shows the known navy/purple diagnostic
+ * picture rather than an undefined framebuffer.
  */
 
 #include "graphics/renderer.h"
 
 #include "diagnostics/log.h"
+#include "graphics/g2d/g2d.h"
+#include "graphics/pica/gpu.h"
+#include "graphics/pica/targets.h"
+#include "graphics/resources/atlas.h"
+#include "runtime/kj_bridge.h"
 
 #include <3ds.h>
 #include <citro3d.h>
+#include <stddef.h>
 
-#define CMDBUF_BYTES (256 * 1024)
+#define CMDBUF_BYTES (512 * 1024)
 
-/* Same transfer flags as sinjoh's pica/targets.c: RGBA8 render target to an
- * RGB8 scanout, no scaling, no vertical flip. */
-#define DISPLAY_TRANSFER_FLAGS                                                                  \
-    (GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) | GX_TRANSFER_RAW_COPY(0) |              \
-     GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8) | GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGB8) | \
-     GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO))
+/* The DS-side counter (engine/stubs/port_stubs.c). It is the emulated DS
+ * V-blank clock, not the presentation count. */
+extern unsigned int unowa_pacing_vblanks;
+extern void unowa_frame_input(kj_frame_input *in, uint32_t vblanks, uint32_t game_frame);
+/* sinjoh's H-blank walk: fills the per-line register shadow for this frame
+ * (nitro_port.h:191). The DS runs it once per V-blank after the game armed
+ * the effects; the renderer is the last reader, so it runs it here. */
+extern int NitroPort_HBlankLinesOnce(void);
 
-static C3D_RenderTarget *s_top;
-static C3D_RenderTarget *s_bottom;
 static bool s_ready;
+static uint32_t s_presents;
 
 bool unowa_renderer_init(void)
 {
@@ -40,43 +58,34 @@ bool unowa_renderer_init(void)
         return false;
     }
 
-    s_top = C3D_RenderTargetCreate(UNOWA_TOP_HEIGHT, UNOWA_TOP_WIDTH, GPU_RB_RGBA8,
-                                   GPU_RB_DEPTH24_STENCIL8);
-    s_bottom = C3D_RenderTargetCreate(UNOWA_BOTTOM_HEIGHT, UNOWA_BOTTOM_WIDTH, GPU_RB_RGBA8,
-                                      GPU_RB_DEPTH24_STENCIL8);
-    if (s_top == NULL || s_bottom == NULL) {
+    if (!kj_targets_init()) {
         kj_log("[gpu] render target allocation failed (VRAM free %lu KiB)",
                (unsigned long)(vramSpaceFree() / 1024));
-        unowa_renderer_exit();
+        C3D_Fini();
         return false;
     }
-    C3D_RenderTargetSetOutput(s_top, GFX_TOP, GFX_LEFT, DISPLAY_TRANSFER_FLAGS);
-    C3D_RenderTargetSetOutput(s_bottom, GFX_BOTTOM, GFX_LEFT, DISPLAY_TRANSFER_FLAGS);
-
-    /* Keep citro3d's frame counter at the physical 60 Hz display rate.
-     * unowa_frame_pacing uses C3D_FrameCounter(0) as the emulated V-blank
-     * clock, and C3D_FrameRate(30) would make it advance every second
-     * V-blank, halving the game tick (coffeepot frame-pacing.md, "Locking the
-     * frame rate"). Presentation is throttled to 30 Hz by the caller. */
+    if (!kj_g2d_init()) {
+        kj_log("[g2d] init failed");
+        kj_targets_exit();
+        C3D_Fini();
+        return false;
+    }
 
     s_ready = true;
-    kj_log("[gpu] targets ready (linear free %lu KiB, VRAM free %lu KiB)",
+    kj_log("[gpu] targets and 2D engine ready (linear free %lu KiB, VRAM free %lu KiB)",
            (unsigned long)(linearSpaceFree() / 1024), (unsigned long)(vramSpaceFree() / 1024));
     return true;
 }
 
 void unowa_renderer_exit(void)
 {
-    if (s_top != NULL) {
-        C3D_RenderTargetDelete(s_top);
-        s_top = NULL;
+    if (!s_ready) {
+        return;
     }
-    if (s_bottom != NULL) {
-        C3D_RenderTargetDelete(s_bottom);
-        s_bottom = NULL;
-    }
-    s_ready = false;
+    kj_g2d_exit();
+    kj_targets_exit();
     C3D_Fini();
+    s_ready = false;
 }
 
 bool unowa_renderer_present(uint32_t top_color, uint32_t bottom_color)
@@ -84,26 +93,44 @@ bool unowa_renderer_present(uint32_t top_color, uint32_t bottom_color)
     if (!s_ready) {
         return false;
     }
-    /* No SYNCDRAW: waiting for the display here would slow the game tick.
-     * This only waits for the previous frame's GPU work (coffeepot
-     * frame-pacing.md, "The timing model"). Presentation is throttled to 30 Hz
-     * by the caller and may be skipped; the game tick is not. */
+
+    /* No SYNCDRAW: wait for the previous frame's GPU work only, never for
+     * the display. Presentation is throttled to 30 Hz by the caller and may
+     * be skipped; the game tick is not. */
     if (!C3D_FrameBegin(0)) {
         return false;
     }
-    /* A target must be declared drawn this frame or citro3d does not transfer
-     * it to its screen at queue finish (sinjoh engine/graphics/g2d/g2d.c does
-     * the same through C3D_FrameDrawOn); a clear alone leaves the LCD black. */
-    if (!C3D_FrameDrawOn(s_top)) {
+
+    const kj_ds_memory *mem = kj_ds_get_memory();
+    const uint32_t dispcnt = (uint32_t)mem->io[0] | ((uint32_t)mem->io[1] << 8) |
+                             ((uint32_t)mem->io[2] << 16) | ((uint32_t)mem->io[3] << 24);
+
+    if (dispcnt == 0) {
+        /* The game has not brought the 2D engine up yet. */
+        C3D_FrameDrawOn(kj_target_get(KJ_SCREEN_TOP)->rt);
+        C3D_RenderTargetClear(kj_target_get(KJ_SCREEN_TOP)->rt, C3D_CLEAR_ALL, top_color, 0);
+        C3D_FrameDrawOn(kj_target_get(KJ_SCREEN_BOTTOM)->rt);
+        C3D_RenderTargetClear(kj_target_get(KJ_SCREEN_BOTTOM)->rt, C3D_CLEAR_ALL, bottom_color, 0);
         C3D_FrameEnd(0);
-        return false;
+        ++s_presents;
+        return true;
     }
-    C3D_RenderTargetClear(s_top, C3D_CLEAR_ALL, top_color, 0);
-    if (!C3D_FrameDrawOn(s_bottom)) {
-        C3D_FrameEnd(0);
-        return false;
-    }
-    C3D_RenderTargetClear(s_bottom, C3D_CLEAR_ALL, bottom_color, 0);
+
+    kj_frame_input in;
+    (void)NitroPort_HBlankLinesOnce();
+    unowa_frame_input(&in, unowa_pacing_vblanks, s_presents + 1u);
+
+    kj_gpu_invalidate();
+    kj_atlas_begin_frame();
+    kj_g2d_begin_frame();
+
+    /* Engine A is on the screen POWCNT1 says; the other engine is the other
+     * screen (the DS can swap them). */
+    const int top_engine = in.engine_a_on_top ? 0 : 1;
+    kj_screen_draw(KJ_SCREEN_TOP, top_engine, &in);
+    kj_screen_draw(KJ_SCREEN_BOTTOM, top_engine ^ 1, &in);
+
     C3D_FrameEnd(0);
+    ++s_presents;
     return true;
 }

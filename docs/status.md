@@ -10,7 +10,7 @@ verified on Old 3DS. Do not collapse them.
 | M0 — Bootstrap | implemented, compiled, tested in emulator | see below | native `.3dsx`, release/profile, async SD log, 30 Hz GPU presentation; both screens render the clear colour |
 | M1 — Game compilation | implemented; compiled; linked; tested headlessly | `link-final` builds `m1-test.3dsx`; see below | boots, then faults on DS I/O in M2 territory |
 | M2 - Native boot | in progress; tested headlessly | game's own `NitroMain` loop now runs one tick per V-blank; 17 overlays; intro cutscene reached in LOTUS; clear-frame presentation reaches both screens | game graphics need M3/M4; input forwarding not yet exercised |
-| M3 — 2D | not started | | G2D bridge, VRAM/OAM, palette, windows |
+| M3 — 2D | in progress; rendering in LOTUS | DS 2D engine on the PICA: Pokémon Company/Nintendo logo and copyright screens captured; `mainloop` 1194, `presents` 597 over 1200 frames | text/affine BG, OBJ, windows, blending and brightness from sinjoh's g2d; wide art and 3D layer are stubs |
 | M4 — 3D | not started | | geometry commands, model path, PICA renderer |
 | M5 — Gameplay | not started | | input, scripts, audio, resources, saves |
 | M6 — Widescreen | not started | | 400px, camera/culling, WideArt |
@@ -653,6 +653,44 @@ directly follows a pointer cast, using the same `REGIONS` table as the header
 generator; control words such as `0x04000000 | (size / 4)` in `mi_dma.c` and
 region comparisons keep their values. This is the same rule the main-RAM
 literal rewrite already applied.
+
+### M3: the DS 2D engine on the PICA
+
+The renderer is no longer a clear. `engine/graphics/g2d/g2d.c` is sinjoh's DS
+2D engine (GPL-3.0, 1774be6), adapted not rewritten: it translates one
+engine's DISPCNT, BG registers, palettes, BG/OBJ VRAM and OAM per scanline
+span into ordered GPU passes, with windows, alpha blending, BLDY and master
+brightness. `engine/graphics/resources/atlas.c` expands DS tiles into a
+1024x1024 RGBA5551 atlas with exact-compare caching, `pica/gpu.c` owns the
+citro3d state and the 2D shader, and `pica/targets.c` is the same 1.25x
+geometry sinjoh uses (256x192 DS pixels -> 320x240, centred at +40 px on the
+400 px top screen).
+
+Two pieces are deliberately absent, because they belong to later milestones
+and pretending otherwise would be a half step:
+
+- `g2d/wideart_stub.c` returns zero pictures. The side bands beyond the DS
+  picture stay black until M6 supplies real artwork; g2d's wide branches are
+  dead rather than approximated.
+- `g3d/g3d_stub.c` supplies `kj_g3d_set_frame`/`draw`/`wbuffer`. g2d only
+  calls the 3D layer when the frame input carries a decoded scene
+  (`has_3d` requires `in->g3 != NULL`), which unowa does not produce until M4.
+
+`engine/runtime/unowa_frame.c` builds the `kj_frame_input`: the DS memory
+view, the VRAMCNT bank decode and sinjoh's per-line register shadow. It
+publishes from `NitroPort_OnFrame`, the boundary proven in "The frame
+bridge". The renderer runs sinjoh's `NitroPort_HBlankLinesOnce()` before
+reading that shadow, so H-blank effects are walked once per frame.
+
+Verified in LOTUS, secondary session on card `unowa`, asset `unowa-m1`,
+1200 frames with no stop: `unowa_mainloop_count == 1194`,
+`unowa_pacing_vblanks == 1194`, `unowa_present_count == 597`, 18 overlays.
+Captures show the Game Freak/Pokémon Company and Nintendo logo screens, and
+then the copyright screen, drawn on the top screen at the expected 1.25x
+scale; the bottom screen is the game's white/black output, not a port
+placeholder. Later frames are black while DISPCNT is in mode 5
+(`0x40010C05`, BG2/BG3 affine), which is the intro's next scene and is under
+investigation.
 
 
 ### Wireless stubs

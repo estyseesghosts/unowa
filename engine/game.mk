@@ -62,13 +62,37 @@ TOOLS := $(dir $(lastword $(MAKEFILE_LIST)))../tools
 # once per V-blank and presents one clear picture every other V-blank. This
 # proves the frame loop reaches the display; the G2D/PICA game bridge is M3/M4.
 ENGINE_SRCS := engine/graphics/renderer.c engine/diagnostics/log.c \
+               engine/graphics/g2d/g2d.c engine/graphics/g2d/wideart_stub.c \
+               engine/graphics/g3d/g3d_stub.c engine/graphics/pica/gpu.c \
+               engine/graphics/pica/targets.c engine/graphics/resources/atlas.c \
+               engine/runtime/unowa_frame.c \
                engine/storage/paths.c engine/runtime/unowa_edition.c \
                engine/runtime/frame_pacing.c
 ENGINE_OBJS := $(patsubst %.c,$(OUT)/obj/%.o,$(ENGINE_SRCS))
+# sinjoh's 2D path carries profiling hooks guarded by HGSS_PROFILE_OFF; unowa
+# publishes its own counters, so compile them out rather than add the perf TU.
 ENGINE_CFLAGS := -std=gnu11 -O2 -g -Wall -Wextra -Wno-unused-parameter \
+                 -Wno-unused-variable \
                  -ffunction-sections -fdata-sections -march=armv6k -mtune=mpcore \
                  -mfpu=vfp -mfloat-abi=hard -mtp=soft -mword-relocations \
-                 -fno-short-enums -D__3DS__ -Iengine -I$(DEVKITPRO)/libctru/include
+                 -fno-short-enums -D__3DS__ -DHGSS_PROFILE_OFF \
+                 -Iengine -I$(DEVKITPRO)/libctru/include
+
+# The 2D shader: picasso assembles it, bin2s wraps it with the g2d_shbin
+# symbols gpu.c declares. Same toolchain and naming as sinjoh engine/game.mk.
+PICASSO := $(DEVKITPRO)/tools/bin/picasso
+BIN2S   := $(DEVKITPRO)/tools/bin/bin2s
+SHADER_OBJS := $(OUT)/gen/shaders/g2d_shbin.o \
+               $(OUT)/gen/shaders/g3d_shbin.o \
+               $(OUT)/gen/shaders/g3d_lit_shbin.o
+ENGINE_OBJS += $(SHADER_OBJS)
+
+$(OUT)/gen/shaders/%_shbin.o: engine/graphics/pica/shaders/%.v.pica
+	@mkdir -p $(dir $@)
+	@echo "  SH  $*.v.pica"
+	@$(PICASSO) -o $(OUT)/gen/shaders/$*.shbin $<
+	@$(BIN2S) $(OUT)/gen/shaders/$*.shbin > $(OUT)/gen/shaders/$*_shbin.s
+	@$(DEVKITARM)/bin/arm-none-eabi-as -o $@ $(OUT)/gen/shaders/$*_shbin.s
 
 BLOCKED := $(strip $(shell grep -v '^#' $(dir $(lastword $(MAKEFILE_LIST)))game_blocklist.txt | grep -v '^$$'))
 BLOCKED_OVERLAY := $(strip $(shell grep -v '^#' $(dir $(lastword $(MAKEFILE_LIST)))game_overlay_blocklist.txt | grep -v '^$$'))
