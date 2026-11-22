@@ -9,7 +9,7 @@ verified on Old 3DS. Do not collapse them.
 |---|---|---|---|
 | M0 — Bootstrap | implemented, compiled, tested in emulator | see below | native `.3dsx`, release/profile, async SD log, 30 Hz GPU presentation; both screens render the clear colour |
 | M1 — Game compilation | implemented; compiled; linked; tested headlessly | `link-final` builds `m1-test.3dsx`; see below | boots, then faults on DS I/O in M2 territory |
-| M2 - Native boot | in progress; tested headlessly | clean 1200-frame LOTUS boot; overlay loads and unsupported-service failures observable | input forwarding present but not yet exercised; screens still black |
+| M2 - Native boot | in progress; tested headlessly | clean 1800-frame LOTUS boot; overlay loads and unsupported-service failures observable; clear-frame presentation reaches both screens | game graphics need M3/M4; input forwarding not yet exercised |
 | M3 — 2D | not started | | G2D bridge, VRAM/OAM, palette, windows |
 | M4 — 3D | not started | | geometry commands, model path, PICA renderer |
 | M5 — Gameplay | not started | | input, scripts, audio, resources, saves |
@@ -271,6 +271,17 @@ writes only to stderr, which LOTUS does not capture. The final link passes
 emulator: after a clean 1200-frame boot `unowa_unimplemented_log_count == 6`,
 each entry reading `ARM7 service: NVRAM (user settings)`. Those are the
 explicit failures for the unimplemented NVRAM ARM7 service, not silent hangs.
+
+The M0 renderer is wired into the M2 harness. `engine/game.mk` compiles
+`renderer.c`/`log.c`/`paths.c` with the root Makefile's ARM11 flags; the test
+entry calls `gfxInitDefault()` and `unowa_renderer_init()` before `NitroMain`,
+and the strong `NitroPort_OnFrame` calls `unowa_renderer_present()` on each
+emulated V-blank (counter `unowa_present_count`). This is the clear-only path
+from `renderer.c:1-8`, not the G2D/PICA game bridge: it proves the frame loop
+reaches the display, which is a prerequisite for M3/M4. LOTUS at 1800 frames:
+`last_error` empty, `unowa_present_count == 130`, top screen RGB (16,24,48)
+and bottom (24,16,24) — the renderer's clear colours. Game graphics still need
+M3/M4.
 
 Result: `lotus_run_until` reaches 1200 frames with `last_error` empty, four
 live guest threads, and `unowa_overlay_log_count == 6`. The log records the

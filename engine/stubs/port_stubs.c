@@ -383,6 +383,14 @@ enum {
     UNOWA_DS_DOWN = 0x0080,
 };
 
+/* M2 presentation: prove the frame loop reaches the display before the G2D/
+ * PICA game bridge exists. The renderer is a clear-only path (renderer.c:1-8);
+ * the alternating shades match the M0 loop (engine/app/main.c:108). The count
+ * lets the emulator confirm NitroPort_OnFrame is reached without a screenshot.
+ */
+extern int unowa_renderer_present(unsigned int top_color, unsigned int bottom_color);
+unsigned int unowa_present_count;
+
 void NitroPort_OnFrame(void)
 {
     hidScanInput();
@@ -418,6 +426,10 @@ void NitroPort_OnFrame(void)
     } else {
         NitroPort_SetTouch(0, 0, 0);
     }
+
+    static const unsigned int s_shades[2] = { 0x101830FFu, 0x1B2A4AFFu };
+    unowa_renderer_present(s_shades[unowa_present_count & 1u], 0x181018FFu);
+    unowa_present_count++;
 }
 
 /* DS ROM read-protection check (fs_proc_rom.h:10); unowa reads from SD. */

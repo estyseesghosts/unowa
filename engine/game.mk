@@ -54,6 +54,19 @@ endif
 OUT := build/game/3ds
 LIB := $(OUT)/libunowa_game.a
 
+# M2/M3 presentation. The M0 GPU renderer and its log/storage dependencies are
+# compiled with the root Makefile's ARM11 flags (see Makefile:58-68) and linked
+# into the test ELF. The test entry initialises the renderer; the strong
+# NitroPort_OnFrame in port_stubs.c presents one clear picture per V-blank. This
+# proves the frame loop reaches the display; the G2D/PICA game bridge is M3/M4.
+ENGINE_SRCS := engine/graphics/renderer.c engine/diagnostics/log.c \
+               engine/storage/paths.c
+ENGINE_OBJS := $(patsubst %.c,$(OUT)/obj/%.o,$(ENGINE_SRCS))
+ENGINE_CFLAGS := -std=gnu11 -O2 -g -Wall -Wextra -Wno-unused-parameter \
+                 -ffunction-sections -fdata-sections -march=armv6k -mtune=mpcore \
+                 -mfpu=vfp -mfloat-abi=hard -mtp=soft -mword-relocations \
+                 -fno-short-enums -D__3DS__ -Iengine -I$(DEVKITPRO)/libctru/include
+
 BLOCKED := $(strip $(shell grep -v '^#' $(dir $(lastword $(MAKEFILE_LIST)))game_blocklist.txt | grep -v '^$$'))
 BLOCKED_OVERLAY := $(strip $(shell grep -v '^#' $(dir $(lastword $(MAKEFILE_LIST)))game_overlay_blocklist.txt | grep -v '^$$'))
 GAME_CORE := $(wildcard $(GAME)/arm9/*.c) $(wildcard $(GAME)/arm9_autoload0_ITCM/*.c)
@@ -222,13 +235,17 @@ link-probe-real: $(OUT)/probe-gv-undefined.txt $(OUT)/gen/ds_data.o $(OUT)/gen/d
 
 # Final link test: a real ARM11 ELF and .3dsx using devkitPro's runtime.
 # This is the same library set as the M0 build plus the game closure.
+$(OUT)/obj/engine/%.o: engine/%.c
+	@mkdir -p $(dir $@)
+	@$(DEVKITARM)/bin/arm-none-eabi-gcc $(ENGINE_CFLAGS) -c $< -o $@
+
 $(OUT)/gen/m1_main.o:
 	@mkdir -p $(dir $@)
-	@printf 'extern void NitroMain(void);\nextern void NitroPort_InitArm7Services(void);\nint main(void) { NitroPort_InitArm7Services(); NitroMain(); return 0; }\n' > $(OUT)/gen/m1_main.c
+	@printf 'extern void NitroMain(void);\nextern void NitroPort_InitArm7Services(void);\nextern void gfxInitDefault(void);\nextern int unowa_renderer_init(void);\nint main(void) { gfxInitDefault(); if (!unowa_renderer_init()) { return 1; } NitroPort_InitArm7Services(); NitroMain(); return 0; }\n' > $(OUT)/gen/m1_main.c
 	@$(DEVKITARM)/bin/arm-none-eabi-gcc $(PORT_CFLAGS) -c $(OUT)/gen/m1_main.c -o $@
 
 $(OUT)/m1-test.elf: $(OUT)/gen/m1_main.o $(OUT)/probe-gv-undefined.txt \
-                    $(OUT)/gen/ds_data.o $(OUT)/gen/ds_data_gv.o
+                    $(OUT)/gen/ds_data.o $(OUT)/gen/ds_data_gv.o $(ENGINE_OBJS)
 	@$(DEVKITARM)/bin/arm-none-eabi-gcc -march=armv6k -mtune=mpcore \
 	    -mfpu=vfp -mfloat-abi=hard -mtp=soft -mword-relocations \
 	    -fno-short-enums -D__3DS__ -specs=3dsx.specs \
@@ -238,7 +255,7 @@ $(OUT)/m1-test.elf: $(OUT)/gen/m1_main.o $(OUT)/probe-gv-undefined.txt \
 	    $(NITRO)/build/3ds/libnitro.a \
 	    $(NNS)/build/3ds/libnitrosystem.a \
 	    $(OUT)/gen/ds_data.o $(OUT)/gen/ds_data_gv.o $(REN_DIR)/kj_g3.o \
-	    $(REN_DIR)/port_stubs.o -Wl,--end-group \
+	    $(REN_DIR)/port_stubs.o $(ENGINE_OBJS) -Wl,--end-group \
 	    -lcitro3d -lctru -lm -o $@
 
 $(OUT)/m1-test.3dsx: $(OUT)/m1-test.elf
