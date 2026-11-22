@@ -11,7 +11,7 @@ verified on Old 3DS. Do not collapse them.
 | M1 — Game compilation | implemented; compiled; linked; tested headlessly | `link-final` builds `m1-test.3dsx`; see below | boots, then faults on DS I/O in M2 territory |
 | M2 - Native boot | in progress; tested headlessly | game's own `NitroMain` loop now runs one tick per V-blank; 18 overlays; the intro is reached and the DS pad is forwarded (START skips the intro) | 3D scenes and display capture are M3/M4 work |
 | M3 — 2D | implemented for the boot and intro scenes; rendering in LOTUS | DS 2D engine on the PICA: logo, copyright, the full intro movie and the Pokémon Black logo captured; `mainloop` 1194, `presents` 597 over 1200 frames; direct-colour affine BGs read 16-bit bitmaps | text/affine/extended BGs, OBJ, windows, blending, brightness, direct-colour bitmaps; 256-colour bitmap BGs and the wide art remain out |
-| M4 — 3D | in progress | geometry engine and storage wired; title demo's model/texture/animation resources now load (anmTbl relocation fixed); no 3D scene is published yet because the title menu faults first in CLACT | capture (`DISPCAPCNT`) is not modelled; the title menu crash blocks reaching the 3D draw |
+| M4 — 3D | in progress | title screen renders and survives START (logo, background, blinking prompt); geometry engine and storage wired; title demo's model/texture/animation resources load | no 3D scene is published yet (`unowa_g3_frames` 0) and `DISPCAPCNT` capture is not modelled; the start menu is not reached |
 | M5 — Gameplay | not started | | input, scripts, audio, resources, saves |
 | M6 — Widescreen | not started | | 400px, camera/culling, WideArt |
 | M7 — Optimization | not started | | hardware profiling, budgets |
@@ -733,11 +733,26 @@ so the word is rebased as data (58 words moved from function pointers to
 flat data pointers; `0x021BD4E0` now holds `0xB813E4`, whose table is
 `{1,0},{6,0}`).
 
-The next scene is the title menu: DISPCNT becomes `0x1E0918` (mode 0, 3D on
-BG0), and it faults after about 1940 frames in `CLACT_ApplyActorTransform`
-with an unmapped 32-bit read of `0x020A9FF8`. That is the open M4 blocker;
-the display capture the title demo arms (`DISPCAPCNT`, `0x04000064`) is not
-modelled yet either.
+The title screen then follows and renders: the Pokémon Black Version logo,
+the animated background and the blinking "PRESS START", and it survives
+START presses (LOTUS: 3336 frames, no stop, `mainloop 3330`,
+`presents 1665`, DISPCNT `0x1E0918`). The earlier crash there was a bare
+DS literal: `NNS_G2dGetOamSoftEmuAutoZOffsetStep`
+(`nns_g2d_renderer_core.c:411`) reads `*(int *)0x20A8218`, written with the
+leading zero dropped. `MAIN_LITERAL` in `patch_sources.py` only matched
+`0x02xxxxxx`, so the read stayed a DS address and faulted natively at
+`0x020A8218` as soon as the title's cell actors were drawn. The pattern now
+accepts both spellings; the patched line is
+`*(int *)(((unsigned int)NitroPort_MainMem + 0x0A8218))`, the same address
+`flat_names.ld` gives `sOamSoftEmuAutoZOffsetStep`. The same rule also
+catches `gf_standard.c`'s `(u32 *)(0x2146A1C)`, which had the same latent
+bug.
+
+Still open for M4: no 3D scene reaches the renderer yet (`unowa_g3_frames`
+stays 0 on the title), and `DISPCAPCNT` (`0x04000064`) is not modelled, so
+the title's 3D-driven content is not captured into its direct-colour BG.
+The start menu itself has not been reached; the title demo keeps looping.
+
 
 
 

@@ -202,7 +202,11 @@ def rewrite_shared_area(text, header_macros):
 # comparison it becomes the native function: by name through an assembler
 # label, or, for a file-static function, through a global alias appended to
 # the same TU.
-MAIN_LITERAL = re.compile(r"(?<![\w.])0x02([0-9A-Fa-f]{6})[uUlL]*(?![\w])")
+MAIN_LITERAL = re.compile(r"(?<![\w.])0x(?:02|2)([0-9A-Fa-f]{6})[uUlL]*(?![\w])")
+# Matched sources write a main-RAM address either as 0x02xxxxxx or with the
+# leading zero dropped (0x20A8218 in nns_g2d_renderer_core.c:411). Both name
+# the same DS address; the pointer-cast test below is what decides that it is
+# an address at all.
 # I/O, palette, VRAM and OAM address literals in the DS 0x04000000..0x07FFFFFF
 # window. gen_port_ioreg_header.REGIONS is the single mapping table; the same
 # pointer-cast rule as MAIN_LITERAL keeps DMA control words (0x04000000 |
