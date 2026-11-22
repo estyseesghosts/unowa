@@ -16,9 +16,11 @@ worker exit 0xC000001D
 
 ## Reproduction
 
-The crashing build was overwritten, so the repro rebuilds it exactly. On top of
-commit `8bcf10f` plus this session's working tree, revert one line of
-`tools/gen_flat_image.py`:
+The crashing build was overwritten, so the repro rebuilds it exactly. The tree
+was `1642c8f` without `engine/runtime/ds_boot.c` and its call in
+`game_main.c`, and without `check_module_bounds`. That is the tree as it stood
+before those two were added. One line of `tools/gen_flat_image.py` was then
+reverted:
 
 ```python
 tail_end = base + len(image_bytes)   # was min(..., module["ram_end"])
