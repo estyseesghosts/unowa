@@ -86,7 +86,8 @@ DEPS     := $(GAME_OBJS:.o=.d)
 PATCHED := ov009/wcm_wmif.c ov013/vct_audio.c twl/nwmif.c \
            twl/dsp_pipe.c arm9/scfg_proc.c ov094/btlv_input.c \
            ov119/pokemontrade_2d.c twl/pm.c arm9/gf_overlay.c \
-           ov016/sceneoptmovconfirm.c ov016/sceneoptmovconfirm1.c
+           ov016/sceneoptmovconfirm.c ov016/sceneoptmovconfirm1.c \
+           arm9/gfl_use.c
 # Every compiled TU the port-wide rewrites change is patched too: DS main-RAM
 # and shared-area address literals into the flat image, code addresses into
 # native functions, per-file data names and overlay ids (tools/patch_sources.py).
@@ -279,6 +280,12 @@ $(OUT)/src/arm9/scfg_proc.c: $(GAME)/arm9/scfg_proc.c
 
 # The shadow-array address for OBJ VRAM is not an integer constant expression,
 # so these two files cannot use it as an enum enumerator.
+# Diagnostic: count NitroMain loop iterations (see patch_sources.py).
+$(OUT)/src/arm9/gfl_use.c: $(GAME)/arm9/gfl_use.c tools/patch_sources.py
+	@mkdir -p $(dir $@)
+	@python3 tools/patch_sources.py --source $(GAME) --out $(OUT)/src \
+	    --fixup mainloop_probe arm9/gfl_use.c
+
 # Report each overlay load through sinjoh's port log.
 $(OUT)/src/arm9/gf_overlay.c: $(GAME)/arm9/gf_overlay.c
 	@mkdir -p $(dir $@)

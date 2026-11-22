@@ -539,6 +539,7 @@ extern int unowa_renderer_present(unsigned int top_color, unsigned int bottom_co
 extern void unowa_frame_pacing_vblank(void);
 extern unsigned int unowa_pacing_vblanks;
 unsigned int unowa_present_count;
+unsigned int unowa_mainloop_count;  /* diagnostic: NitroMain iterations */
 
 /* The DS V-blank counter lives in the shared work area (HW_VBLANK_COUNT_BUF,
  * DS 0x02FFFC3C). The DS ARM7 advances it (NitroSDK os_irqTable.c:168 is

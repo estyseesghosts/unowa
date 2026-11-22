@@ -71,6 +71,14 @@ AUTONAME_RE = re.compile(r"\b(?:d|g|data)_([0-9A-Fa-f]{8})(?:_\w+)?\b")
 MAIN_RAM_LOW = 0x02000000
 MAIN_RAM_HIGH = 0x03000000
 FLAT_MASK = 0x7FFFFF
+# The game's DTCM window of 16 KB (crt0.c:43, crt0.c:278); see host_location.
+DTCM_LOW = 0x02FE0000
+DTCM_HIGH = 0x02FE4000
+# OS structures inside it that sinjoh's libnitro also owns. There is one
+# hardware table/queue, so both names must resolve to the same memory.
+IRQ_TABLE_LOW = 0x02FE0020   # OS_IRQTable, 32 entries (os_interrupt.c:25)
+IRQ_TABLE_HIGH = 0x02FE00A0
+IRQ_QUEUE_LOW = 0x02FE00A0   # OSi_IrqThreadQueue (os_interrupt.c:51)
 # A named object inside a code range is copied up to the next function entry,
 # never further than this. Every such name found so far is a crt0 parameter
 # block, a version string or an SDK table well under it.
@@ -267,11 +275,19 @@ def function_table(aletheia, compiled, native):
         value = int(address, 16) | (1 if isa == "thumb" else 0)
         key = module_of(region)
         name = namespaces.get((key, name), name)
-        if source not in compiled:
-            continue
         if static != "no":
-            statics.setdefault(key, {})[value] = name
+            if source in compiled:
+                statics.setdefault(key, {})[value] = name
             continue
+        # The final link defines the name (`native`), so the DS pointer can be
+        # rewritten to it whether the Aletheia source is compiled or the
+        # function comes from sinjoh's NitroSDK. Requiring `source in compiled`
+        # left every SDK function out of the table (gx_load2d.c and friends are
+        # provided by libnitro), so pointers to them fell through to the
+        # data-object spans and resolved to a neighbouring symbol plus a byte
+        # offset: ARC_UTIL_gPaletteLoadFns[4] became GX_LoadOBJPltt+8 instead
+        # of GX_LoadOBJPltt, and calling it entered the function's second
+        # instruction with r12 = 1.
         if name not in native:
             continue
         table.setdefault(key, {})[value] = name
@@ -558,6 +574,29 @@ def host_location(address):
     (tools/gen_port_ioreg_header.py REGIONS): an extern named at an I/O
     register or in LCDC VRAM, where ov095 loads, must be the same storage.
     """
+    # This game maps DTCM at 0x02FE0000 (arm9/crt0.c:43 names it
+    # SDK_AUTOLOAD_DTCM_START; INITi_InitRegion at crt0.c:278 writes that base
+    # into the DTCM base register). The same block is also called
+    # SDK_AUTOLOAD_MAIN_TWL_START by the game (gfl_use.c:35, gf_overlay.c:29).
+    # sinjoh's port has exactly one 16 KB block for it (port_memory.c:28), so
+    # every DS name in [0x02FE0000, 0x02FE4000) must resolve there. Binding
+    # it into MainMem instead splits one word in two: GFL_USE_VBlankHandler
+    # sets the IRQ check flag through MAIN_TWL_START + 0x3FF8 (gfl_use.c:578)
+    # while OS_GetIrqCheckFlag reads DTCM_START + 0x3FF8 (interrupt.h:155),
+    # so OS_WaitIrq never wakes.
+    #
+    # Two structures inside the block are owned natively by libnitro, and the
+    # game's reimplemented OS functions share them with it: NitroMain installs
+    # GFL_USE_VBlankHandler through the game's OS_SetIrqFunction
+    # (os_interrupt.c:67), which writes the table named g_02FE0020; the linked
+    # OS_IrqHandler reads OS_IRQTable. Binding the table to the DTCM array
+    # would leave the SDK's table all OS_IrqDummy.
+    if IRQ_TABLE_LOW <= address < IRQ_TABLE_HIGH:
+        return "OS_IRQTable", address - IRQ_TABLE_LOW
+    if address == IRQ_QUEUE_LOW:
+        return "OSi_IrqThreadQueue", 0
+    if DTCM_LOW <= address < DTCM_HIGH:
+        return "SDK_AUTOLOAD_DTCM_START", address - DTCM_LOW
     if in_main_ram(address):
         return "NitroPort_MainMem", ds_flat_offset(address)
     for base, array, size in IOREG_REGIONS:

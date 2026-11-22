@@ -13,6 +13,10 @@ Usage:
 import argparse
 import pathlib
 import re
+import sys
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from gen_port_ioreg_header import REGIONS  # noqa: E402
 
 # Metrowerks `asm { clz x, x }` counts leading zeros in place. GCC's builtin
 # returns the count, so assign it back to the same variable.
@@ -67,6 +71,16 @@ PORT_FIXUPS = {
         ("static void closeFadeStep(void);", "void closeFadeStep(void);", 1),
         ("static void closeFadeStep(void)\n{", "void closeFadeStep(void)\n{", 1),
         ("static void DWCi_SceneOptMovWait(void);", "void DWCi_SceneOptMovWait(void);", 1),
+    ],
+    # Diagnostic: count iterations of the game's own top-level loop. If this
+    # stays at 0 while the DS V-blank counter advances, the main thread is
+    # stuck in OS_WaitIrq and the idle thread is driving V-blanks alone.
+    "mainloop_probe": [
+        ("        OS_WaitIrq(1, 1);\n        GFL_USE_PostIrqUpdate();\n",
+         "        OS_WaitIrq(1, 1);\n"
+         "        extern unsigned int unowa_mainloop_count;\n"
+         "        ++unowa_mainloop_count;\n"
+         "        GFL_USE_PostIrqUpdate();\n", 1),
     ],
     # The switch is on NDMA[ch].cnt & 0x0F000000, so this case is the DS I/O
     # destination-region code 0x04000000, not a pointer to DISPCNT.
@@ -189,6 +203,11 @@ def rewrite_shared_area(text, header_macros):
 # label, or, for a file-static function, through a global alias appended to
 # the same TU.
 MAIN_LITERAL = re.compile(r"(?<![\w.])0x02([0-9A-Fa-f]{6})[uUlL]*(?![\w])")
+# I/O, palette, VRAM and OAM address literals in the DS 0x04000000..0x07FFFFFF
+# window. gen_port_ioreg_header.REGIONS is the single mapping table; the same
+# pointer-cast rule as MAIN_LITERAL keeps DMA control words (0x04000000 |
+# size/4, mi_dma.c:98) and region comparisons (mi_dma.c:301) at their values.
+REGION_LITERAL = re.compile(r"(?<![\w.])0x0([4-7])([0-9A-Fa-f]{6})[uUlL]*(?![\w])")
 POINTER_CAST_BEFORE = re.compile(r"\(\s*[A-Za-z_][\w\s]*(?:\*\s*(?:const\s*)?)+\)\s*\(?\s*$")
 ANY_CAST_BEFORE = re.compile(r"\)\s*\(?\s*$")
 COMPARE_BEFORE = re.compile(r"[!=]=\s*\(?\s*$")
@@ -336,6 +355,40 @@ def rewrite_main_ram(text, relative, index):
                  "extern __typeof__(%s) %s __attribute__((alias(\"%s\")));\n"
                  % (name, symbol, name))
     return text, count
+
+
+def rewrite_port_regions(text):
+    """Redirect DS I/O, palette, VRAM and OAM literals to the port shadows.
+
+    Aletheia's matched sources sometimes name a register by literal rather
+    than through sdk_ioreg.h (`*(vu16 *)0x04000050 = 0` in
+    ov179/cdemo_scene.c:315, BLDCNT). The forced port header rewrites the
+    header macros but cannot touch a literal, and a DS I/O address is unmapped
+    in the ARM11 process. Only a literal directly behind a pointer cast is an
+    address; control words and region codes keep their value.
+    """
+    pieces = []
+    count = 0
+    last = 0
+    for start, end in code_spans(text):
+        pieces.append(text[last:start])
+        code = text[start:end]
+
+        def replace(match):
+            nonlocal count
+            before = code[max(0, match.start() - 80):match.start()]
+            if not POINTER_CAST_BEFORE.search(before):
+                return match.group(0)
+            value = int(match.group(0).rstrip("uUlL"), 16)
+            for base, array, size in REGIONS:
+                if base <= value < base + size:
+                    count += 1
+                    return "((uptr)%s + 0x%X)" % (array, value - base)
+            return match.group(0)
+
+        pieces.append(REGION_LITERAL.sub(replace, code))
+        last = end
+    return "".join(pieces), count
 
 
 def namespace_functions(text, relative, index):
@@ -507,9 +560,11 @@ def patch_text(text, relative, removed=(), fixups=(), index=None):
         count += n
         text, shared = rewrite_shared_area(text, index.header_macros)
         count += shared
-        text, n = rewrite_main_ram(text, relative, index)
-        count += n
-        if n and not shared:
+        text, main_ram = rewrite_main_ram(text, relative, index)
+        count += main_ram
+        text, regions = rewrite_port_regions(text)
+        count += regions
+        if (main_ram or regions) and not shared:
             text = SHARED_DECL + text
     return text, count
 

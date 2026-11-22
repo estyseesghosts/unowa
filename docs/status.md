@@ -9,7 +9,7 @@ verified on Old 3DS. Do not collapse them.
 |---|---|---|---|
 | M0 — Bootstrap | implemented, compiled, tested in emulator | see below | native `.3dsx`, release/profile, async SD log, 30 Hz GPU presentation; both screens render the clear colour |
 | M1 — Game compilation | implemented; compiled; linked; tested headlessly | `link-final` builds `m1-test.3dsx`; see below | boots, then faults on DS I/O in M2 territory |
-| M2 - Native boot | in progress; tested headlessly | clean 1800-frame LOTUS boot; overlay loads and unsupported-service failures observable; clear-frame presentation reaches both screens | game graphics need M3/M4; input forwarding not yet exercised |
+| M2 - Native boot | in progress; tested headlessly | game's own `NitroMain` loop now runs one tick per V-blank; 17 overlays; intro cutscene reached in LOTUS; clear-frame presentation reaches both screens | game graphics need M3/M4; input forwarding not yet exercised |
 | M3 — 2D | not started | | G2D bridge, VRAM/OAM, palette, windows |
 | M4 — 3D | not started | | geometry commands, model path, PICA renderer |
 | M5 — Gameplay | not started | | input, scripts, audio, resources, saves |
@@ -596,15 +596,64 @@ restored to `NitroPort_OnFrame`; the hook was removed. A real M3 bridge must
 identify the boundary the game actually uses, not assume the source-level loop
 is running.
 
-Source scan for other `OS_WaitIrq` loops that do **not** call
-`GFL_USE_PostIrqUpdate` (Aletheia `src/game/`): `UI_SoftReset` (`arm9/ui.c:917-931`
-spins on `GFL_NET_IsIdle`/`CARD_TryWaitBackupAsync`, which the port's stub always
-answers TRUE), `OS_WaitVBlankIntr` (`arm9/os_system.c:172-176`), `net_err.c`
-(lines 573, 879, 1095), and the idle-screen overlay (`ov109/idle_screen.c:118-122`).
-Overlay 109 was not in the 15 loaded at the stop, so these are candidates, not
-a diagnosis. DISPCNT in `NitroPort_IoReg` is still 0 and the palette/BG-VRAM
-shadows are empty, so the game has not configured 2D rendering yet; M3 cannot
-be demonstrated until that stall is located.
+### The main-loop stall: two DTCM aliases
+
+That "does not fire" observation had a cause, found with a build-time counter on
+the `NitroMain` loop: the game thread never left `OS_WaitIrq`, so
+`unowa_mainloop_count` stayed 0 while the idle thread drove V-blanks through
+`NitroPort_Halt`. The game was not stuck in a particular `OS_WaitIrq`; the wait
+itself could never succeed.
+
+On the DS the V-blank handler sets the interrupt check flag by address. The
+game's `GFL_USE_VBlankHandler` writes
+`SDK_AUTOLOAD_MAIN_TWL_START + 0x3FF8` (Aletheia `arm9/gfl_use.c:578`), while
+NitroSDK's `OS_GetIrqCheckFlag` reads `SDK_AUTOLOAD_DTCM_START + 0x3FF8`
+(`nitro/os/common/interrupt.h:155-158`). Both symbols are `0x02FE0000` on the
+DS: it is the 16 KB DTCM, which `INITi_InitRegion` maps there
+(`arm9/crt0.c:278`). unowa's flat-image generator bound
+`SDK_AUTOLOAD_MAIN_TWL_START` into `NitroPort_MainMem` (a main-RAM mirror) and
+left `SDK_AUTOLOAD_DTCM_START` at sinjoh's separate 16 KB block, so the write
+and the read went to different words.
+
+Second mismatch: `NitroMain` installs its handler through the game's own
+`OS_SetIrqFunction` (`arm9/os_interrupt.c:67`), which writes the table named
+`g_02FE0020`, while the linked `OS_IrqHandler` reads NitroSDK's `OS_IRQTable`.
+The table was still all `OS_IrqDummy`.
+
+`tools/gen_flat_image.py` now resolves `[0x02FE0000, 0x02FE4000)` to the one
+DTCM block (`SDK_AUTOLOAD_DTCM_START`), and maps the two shared OS structures
+inside it to libnitro's copies: `[0x02FE0020, 0x02FE00A0)` is `OS_IRQTable`, and
+`0x02FE00A0` is `OSi_IrqThreadQueue`. LOTUS then showed
+`OS_IRQTable[0] == GFL_USE_VBlankHandler` and the main loop advancing.
+
+### Function pointers into SDK-provided functions
+
+With the loop running, the game faulted on `ARC_UTIL_gPaletteLoadFns[4]`: the
+intro cutscene called `GX_LoadOBJPltt + 8` (the function's second instruction)
+with `r12 = 1`, from a table whose other entries were `GX_LoadBG2Char + 732`
+and similar. The generator's DS-to-native function table skipped every function
+whose Aletheia source is not compiled. Files such as `gx_load2d.c` are provided
+by sinjoh's NitroSDK instead, so those DS addresses fell through to the
+*native-data* spans and resolved to a neighbouring symbol plus a byte offset.
+The table now accepts any name the final link defines (`native`), whether the
+Aletheia source or libnitro supplies it; the eight palette loaders resolve to
+their exact functions, with no addends. The same change gives `code_area_spans`
+correct function boundaries for those SDK files, which is why the copied image
+shrank from 380596 to 373292 bytes.
+
+### DS I/O literals in game source
+
+The forced port header rewrites Aletheia's `REG_*_ADDR` macros, but matched
+sources also name registers by literal. The cutscene hit
+`*(volatile unsigned short *)0x04000050 = 0` (`ov179/cdemo_scene.c:319`,
+BLDCNT) and stopped with an unmapped 16-bit write to `0x04000050`. Coffeepot
+`ctr/engineering/porting.md:92` warns about exactly this. `patch_sources.py`
+now rewrites a literal in the DS `0x04000000..0x07FFFFFF` window when it
+directly follows a pointer cast, using the same `REGIONS` table as the header
+generator; control words such as `0x04000000 | (size / 4)` in `mi_dma.c` and
+region comparisons keep their values. This is the same rule the main-RAM
+literal rewrite already applied.
+
 
 ### Wireless stubs
 
