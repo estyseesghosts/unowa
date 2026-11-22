@@ -113,7 +113,8 @@ encrypted `arm9i.bin`. Decrypting that needs a DSi key or BIOS dump.
 unowa's `tools/gen_data_image.py` maps undefined symbols to DS addresses from
 Aletheia's own source headers and reads the bytes from Aletheia's extracted
 region images. It emits ROM-backed and zero-filled definitions into the
-gitignored build tree.
+gitignored build tree. (Superseded by `tools/gen_flat_image.py` and removed;
+see "The flat data model".)
 
 Data fidelity spot-check: `_ArcPathTable` was emitted as exactly 940 bytes,
 which is `0xEB` entries × 4 bytes, matching `ARC_TOOL_SetTable(_ArcPathTable,
@@ -283,68 +284,87 @@ reaches the display, which is a prerequisite for M3/M4. LOTUS at 1800 frames:
 and bottom (24,16,24) — the renderer's clear colours. Game graphics still need
 M3/M4.
 
-### Data pointer relocation
+### The flat data model
 
-ROM-backed data is emitted verbatim, so its stored DS pointers point into
-unmapped DS space on the 3DS. The first concrete fault was `_ArcPathTable`
-(`gfl_use.c:861`, 235 entries), whose entries name the `a/0/0/N` archive paths
-held inside the `PIo2` array; `FS_NormalizePath` dereferenced the raw
-`0x020A6BB0` and stopped the guest. `tools/gen_data_image.py` now emits
-`unowa_ds_relocate()` / `unowa_gv_relocate()`: a table of (slot, target array +
-offset) pairs that rewrites each stored *data* pointer to the emitted array that
-holds the bytes it names. It runs in `main()` before `NitroMain()`.
+The game addresses its data by DS address, and Aletheia declares nearly every
+data object as an extern at that address. The first data model emitted each
+object as its own C array (`tools/gen_data_image.py`). That model needed a
+guessed size for every object, one array per alias, and per-word relocation
+into whichever array held the target. Each of those guesses caused a boot
+fault: BSS placeholders spilled into neighbours, and aliased names went out of
+sync. Overlays could not be loaded at all, because 237 overlays share 58 load
+slots.
 
-The pass covers the ARM9 static region only, whose addresses are unique. The
-generated image reports 302 relocations (235 of them `_ArcPathTable`) and 288
-skipped words. Overlay-internal pointers are untouched, because 237 overlays
-share 58 load slots and cannot be disambiguated until the overlay packaging
-work. Verified in LOTUS: `_ArcPathTable[0]` reads `PIo2 + 0x708` at runtime,
-exactly `0x020A6BC0 - 0x020A64B8`, and the boot no longer stops on the
-`0x020A6BB0` unmapped read.
+The flat model replaces it (`docs/eidos-review.md` sections 1 and 3). DS main
+RAM is sinjoh's 8 MB `NitroPort_MainMem`, and DS `0x02xxxxxx` is
+`NitroPort_MainMem + (address & 0x7FFFFF)`, the mapping sinjoh's shared area
+already uses (`mmap_shared.h:40`). `tools/gen_flat_image.py` writes:
 
-The scan now advances by four bytes from the first DS-aligned address in each
-object (`(-address) % 4`) instead of from the array base. 254 of the emitted
-objects start at a non-multiple of four, and a pointer inside one of them does
-not sit at a multiple of four from the array base; the earlier stride missed
-those (292 -> 302 relocations).
+- `flat_names.ld`: `PROVIDE(name = NitroPort_MainMem + offset)` for every data
+  name. A name is a linker symbol at its byte, so sizes are never guessed,
+  aliases share one value, and a port definition still wins.
+- `flat_image.bin`: each module's ROM bytes. That is its data tail
+  `data_start..ram_end`, plus named data inside its code range.
+- `flat_image.c`: per module (ARM9 is index 0, overlay `id` is `1 + id`), its
+  DS window, the spans to copy, and the pointer words to relocate.
 
-### Function-pointer relocation
+`engine/runtime/flat_memory.c` `load_module` zeroes `ram_end..bss_end`,
+copies the spans and relocates the words. It runs for ARM9 in `main()`, and
+for an overlay when the game loads it. The game loads through sinjoh's
+overlay seams, which unowa wraps (`--wrap=NitroPort_OverlayInfo`,
+`NitroPort_OverlayLoadImage`, `NitroPort_OverlayClearBss`), as
+`FS_LoadOverlay` does on the DS. Code is native and linked once; only data
+moves. `OS_InitArena` is wrapped so the main arena starts above every module
+window.
 
-A ROM pointer table names code, not data. `gFontFormatInitFuncs`
-(`0x0209E73C`, used at `gf_font.c:356`) holds the Thumb addresses
-`0x0201DAA5` and `0x0201DA25`, and `GF_FONT_SetFormat` calls through it with
-`blx r12`. Emitted verbatim, the guest branched to an unmapped DS address; and
-because only that data word referenced the handlers, `--gc-sections` had
-dropped `GF_FONT_InitStreamedGlyphs`, `GF_FONT_InitPreloadedGlyphs`,
-`GF_FONT_ExitStreamedGlyphs` and `GF_FONT_FreeGlyphData` from the image.
+**Pointer words.** Typing comes from Aletheia's `layout/data_objects.json`,
+checked against exact values. The map's coverage is complete, but its types
+come from weak evidence, so each rule requires an exact match:
 
-Each relocation pass now also rewrites a 4-byte word that equals a function
-start in Aletheia's `layout/function_addrs.tsv`, when the row is ARM9-region,
-non-static, and declared in a file the port compiles
-(`engine/game_blocklist.txt`, `game_overlay_blocklist.txt`). The value written
-is the *port* symbol address, so the ISA bit follows how the port built the
-function (ARM here) rather than the DS row; that is what `blx` must receive.
-The reference also keeps the function through `--gc-sections`.
+| Class | Which words | Accepted value |
+| --- | --- | --- |
+| `ptr` | `ptr` fields, `pointer_table` objects | a function in the own module, ARM9, or one other overlay that resolves uniquely; any main-RAM data |
+| holder | non-`ptr` words in a struct or in an object with a `targets` list | as `ptr`. Save table entry 51 holds ov010's `FLDMMDL_GetMovedPosSaveSize`/`InitMovedPosSave` in fields typed `u32` |
+| untyped | `raw`/`zero` and `u32`/`s32` numerics | an exact function entry in the own module or ARM9, or the exact start of a named data object there, inside the module windows `0x02004000..0x02400060` |
 
-Verified: the image resolves 401 function pointers (4 more in the Gen V pass).
-`gFontFormatInitFuncs` in guest RAM reads `001229C0 00122918` =
-`GF_FONT_InitStreamedGlyphs`, `GF_FONT_InitPreloadedGlyphs`;
-`gFontFormatExitFuncs` reads `GF_FONT_ExitStreamedGlyphs`,
-`GF_FONT_FreeGlyphData`; all four are `T` in `m1-test.elf`. As an independent
-check, 325 of the 401 words land in objects that `layout/data_objects.json`
-already types as a pointer field or `pointer_table`. The other 80 are in early
-`.data` the object map does not cover, and every one belongs to a run of two or
-more pointers (mostly the `_ExtraSaveDescs` GetSize/Init pairs); no isolated
-heuristic-only hit exists outside those descriptor tables.
+Three facts from the boot set the untyped rule:
+- `_MainSaveDesc` is typed `raw` and holds `_MainSaveTable`.
+- The save table's first record lies in an object typed `numeric u32`
+  (`BOX_SAVEDATA_GetSize`). The map types a word `u32` from literal-pool loads
+  alone, which hides weather callback tables, process records and CLACT
+  setters.
+- Two lookalike values must be refused. The first is the u16 TM table
+  `g_0209EAA0` (`file_util.c:213`), whose halfword pairs read `0x020A000E`.
+  Objects the source declares as 16-bit arrays are skipped; byte arrays are
+  not skipped, because `u8 name[]` is how Aletheia declares opaque data, and
+  skipping them dropped 332 real function pointers. The second is a glyph
+  word equal to the DTCM base `0x02FE0000`, which the window bound refuses.
+
+Never pointers: `string` objects and `u8`/`u16` numerics.
+
+A resolved word is either native (a function, or data the port defines; the
+table stores the symbol) or flat (the runtime rewrites it to
+`MainMem + (value & 0x7FFFFF)`).
+
+**Module bounds.** A module's bytes stop at its `ram_end`. The ARM9 file has
+`0x940` bytes of autoload blocks (ITCM code, DTCM data) after
+`ram_end` `0x020A9E80`. Copied into main RAM, they overwrote ARM9 BSS after it
+was zeroed, and `_SndSlots[0].handle` became `0xDFECD4CA`. That caused the
+frame-25 fault and the CITnLO GPU abort (`docs/frame25-crash.md`).
+`check_module_bounds` fails the build if any span or relocated word leaves its
+module.
+
+Current image: 380,596 bytes in 247 spans over 238 modules. It holds 7,205
+function pointers, 2,982 flat data pointers and 17 pointers to native data,
+and 53 untyped words name data. Two groups are left as they are: 210 typed
+pointers whose value lies outside main RAM (VRAM, I/O and TCM addresses), and
+109 untyped words inside their own module that name no data start.
 
 One absolute symbol could not stay a `.set`. `ov020_id` is the constant `0x14`
-(`src/matched/ov/ov010_func_0215FA00.c:13`); GNU ld relocates
-`(uptr)ov020_id` with `R_ARM_ABS32` against the ABS symbol and 3dsxtool
-refuses an absolute target below the image base ("Relocation to invalid
-address"). `tools/patch_sources.py` inlines that one constant in
-`ov010/event_wifi_proc.c`. The other `ov*_id` symbols remain addressable data
-variables, so their uses pass a port-side handle that `GF_OVERLAY_Load` must
-normalise (M3).
+(`src/matched/ov/ov010_func_0215FA00.c:13`). GNU ld relocates `(uptr)ov020_id`
+with `R_ARM_ABS32` against the ABS symbol, and 3dsxtool refuses an absolute
+target below the image base ("Relocation to invalid address").
+`tools/patch_sources.py` inlines that one constant in `ov010/event_wifi_proc.c`.
 
 ### Compiler builtin substitution
 
@@ -358,58 +378,7 @@ the main thread Ready and its PC frozen at `0x112804`. `PORT_CFLAGS` now passes
 of the compiler's libc substitutions. `-fno-builtin-strlen` alone does not fix
 it, and the same substitution can hit any other builtin the MSL files define.
 
-### BSS extents and module ownership
-
-Zero-filled objects were emitted as a fixed 64-byte placeholder. The BSS
-region holds real objects much larger than that, and the linker packs
-adjacent ones, so a legitimate write to one object overwrote its neighbours.
-`gGlyphExpandTable` (`gf_font.c`) is a `u16[256]` (512 bytes); as a 64-byte
-array it spilled 448 bytes into `gFontState`, `_PrintJobWork` and
-`_pGlyphBmp`, which is why the print job held glyph tiles and `blitGlyph`
-became `0x47040704`.
-
-The generator now derives each object's extent from the next symbol of the
-*same module* (`arm9` or `ovNNN`, from the declaring file), capped at 8 KiB,
-and uses the module's `bss_end` when no later symbol exists. A symbol is only
-read from ROM when its address lies below its own module's image end, so an
-ARM9 object in ARM9 BSS is never copied from an overlay that later maps the
-same address. That changed the image from 6575 ROM-backed + 200 zero-filled to
-5994 + 781 objects; `gGlyphExpandTable` is 512 bytes, `_PrintJobWork` 28,
-`_pGlyphBmp` 4, `gFontFormatInitFuncs` 8.
-
-### Aliased names share one object
-
-Aletheia gives some storage more than one name: 274 same-module groups cover
-558 names, for example `sOverlayLaunchWork`/`sOverlayLaunchWorkArg` at
-`0x02146948` and `g_brightnessRecords`/`g_brightnessSub` at `0x021468FC`.
-Each name used to become its own array, so a write through one was invisible
-through the other.
-
-`object_groups()` now emits one object per `(module, address)` and declares the
-other names as `__attribute__((alias("primary")))`. The attribute gives both
-names the same address and the same size, and survives `--gc-sections` (checked
-with a two-object link before using it). The primary name is the semantic one
-where Aletheia has one, so `g_brightnessSub` carries `g_brightnessRecords` and
-`sOverlayLaunchWork` carries `sOverlayLaunchWorkArg`. 161 duplicate arrays are
-gone: 5994 + 781 objects became 5905 + 709.
-
-Aliases are deliberately scoped to one module. The same numeric address in two
-modules is not one object: overlays reuse ARM9 RAM slots and reuse slots among
-themselves, so `0x0214616C` is `pBattleRec` in ARM9 and `d_0214616C` in ov125,
-holding different content at different times. 139 such cross-module groups stay
-separate, as they must.
-
-In `m1-test.elf` both pairs now agree (`nm`):
-
-```
-00e8bc38 B g_brightnessRecords
-00e8bc38 B g_brightnessSub
-00e8bbf0 B sOverlayLaunchWork
-00e8bbf0 B sOverlayLaunchWorkArg
-```
-
-This did not move the frame-16 stop; the net-state read below is a different
-bug.
+### The frame-16 stop under the old model
 
 With the function table relocated the earlier `blx r12 = 0x0201DAA5` fault is
 gone. `lotus_run_until(600)` now stops at frame 16 with an unmapped read at
@@ -481,25 +450,8 @@ SAVE_CONTROL_Create -> BACKUP_SYSTEM_Create -> BACKUP_SYSTEM_CreateCore
   -> SAVEDATA_CreateTable -> SAVEDATA_BuildLayout -> SAVEDATA_QueryBlockSize
 ```
 
-and the next failure was a call through the main save block table.
-
-### Overlay function pointers in typed data
-
-The main save block table is a run of `{ id, size_func, init_func }` records at
-`0x0209DA28`. Entry 51 holds `0x0216E475`/`0x0216E47D`, two Thumb functions in
-ov010 (`FLDMMDL_GetMovedPosSaveSize` / `FLDMMDL_InitMovedPosSave`). The
-function-pointer pass only covered ARM9, so the call went to a DS address and
-faulted.
-
-Rewriting a stored overlay address everywhere is not safe: 237 overlays share
-58 load slots, and 6228 words in ARM9 data happen to equal an overlay function
-start (a version string, a certificate blob). The pass now rewrites an overlay
-pointer only when the word sits in an object that Aletheia's
-`layout/data_objects.json` types as holding pointers (`kind` struct or a
-`targets` list). Under that rule exactly two words qualify, and they are the
-two save-layout functions above. `--gc-sections` had dropped those functions;
-the new references keep them and both are `T` in `m1-test.elf` at
-`0x00138600`/`0x00138608`.
+and the next failure was a call through the main save block table: the
+untyped and holder rules in "The flat data model".
 
 ### The DS shared work area
 
@@ -552,13 +504,96 @@ primary card's save.
 Kohjoh and sinjoh were audited for reusable work; the decisions and citations
 are in `docs/reuse-audit.md`.
 
+### The frame-25 crash
+
+The flat boot stopped at frame 25 on an unmapped write to `0xDFECD4CA`, and
+CITnLO then aborted on a GPU address (LOTUS #155). Both writes come from
+`NNS_SndHandleReleaseSeq` releasing `_SndSlots[0]` and `[1]`. Their handles
+held ARM9 autoload bytes that had been copied over BSS. The generator now stops
+at `ram_end` and checks module bounds. The full investigation, repro and
+register captures are in `docs/frame25-crash.md`.
+
+### Boot firmware state
+
+Past frame 25 the boot ran `main()` to its end. An execute breakpoint on
+`abort` showed the path:
+`NitroMain` → `GFL_USE_PollFrameInput` → `UI_Main` → `UI_SoftReset` →
+`OS_ResetSystem` → sinjoh `NitroPort_ResetSystem` → `abort`. No button was
+held. `KEY_PadRead` (Aletheia `arm9/key.c:111-114`) reads `REG_KEYINPUT` and
+`HW_BUTTON_XY_BUF` directly. Both are active-low (sinjoh `port_boot.c:81-82`),
+and nothing had written them, so zero read as every button held. `UI_Main`
+(`arm9/ui.c:272`) treats L+R+Start+Select as a soft reset.
+`NitroPort_OnFrame` writes the real pad state each frame, but it had not run
+when the game first read the keys (`unowa_present_count` was 0 at the reset).
+
+kohjoh runs sinjoh's `NitroPort_BootFirmware` before `NitroMain`
+(`kj_boot.c:105`); unowa's entry never did. `engine/runtime/ds_boot.c` now
+does, right after the flat ARM9 load. It writes:
+- the key register and X/Y/lid word at "nothing held, lid open";
+- a cartridge header with Black's title, game code, maker and device size
+  (from the extracted `header.bin`);
+- owner settings and a fixed MAC address;
+- reset parameter 0.
+
+Verified in LOTUS: 1200 frames with no stop, no terminate and no
+unimplemented call. `unowa_present_count` is 587, since presentation is paced
+to 30 Hz (`renderer.c`, `C3D_FrameRate(30.0f)`). The overlay log shows 15
+runtime loads: 10, 11, 9, 13, 10, 11, 228, 13, 9, 10, 11, 13, 9, 10, 11.
+
+Still open: the owner settings are kohjoh's defaults ("Player", English,
+1 January; kohjoh `src/app/main.c:218-228`). Reading them from the 3DS system
+configuration needs a source for the CFG block layout, and coffeepot has no
+article on it yet.
+
+### Wireless stubs
+
+**DS wireless and the DSi DSP are stubbed, not ported.** Revisit this before
+any multiplayer, Download Play, Wi-Fi Connection or DSi-camera feature.
+
+The 3DS local wireless service is UDS, which "is not DS Wireless" (coffeepot
+`ctr/glossary.md:429`). There is nothing to forward the DS `WM`/`MB` protocol
+to, and Eidos has no answer either (`docs/eidos-review.md` section 6). Once the
+flat image referenced every typed function pointer, the linker pulled in the
+callers of these entry points, and their real implementations are blocked from
+the build: `ov107/mb_wm_base.c` and `ov114/crypto_bobj2.c` are Metrowerks
+inline assembly, `twl/dsp_process.c` needs DSi-keyed generated data
+(`engine/game_overlay_blocklist.txt`), and the arm9 FS/CARD/NNS-font files
+duplicate or conflict with sinjoh's libraries (`engine/game_blocklist.txt`).
+
+`engine/stubs/wireless_stubs.c` defines each of them. Every stub reports its
+name once through `NitroPort_Unimplemented` (so it lands in
+`unowa_unimplemented_log_names`, readable in LOTUS) and returns the value its
+callers already treat as failure:
+
+| Group | Entry points | Callers | Stub result |
+| --- | --- | --- | --- |
+| Download Play | `MB_Init`, `MB_SetParentCommParam`, `MB_StartParentFromIdle` | `ov107/mbp.c`, `ov016/dwc_mov_mbp.c` | `MB_ERRCODE_INVALID_STATE` (2); `MB_Init` failure panics in both callers |
+| | `MB_EndToIdle`, `MB_DisconnectChild`, `DWCi_DwcMoveidMB_EndToIdle` | same, `ov016/dwc_moveid.c` | no-op |
+| | `MBi_IsStarted` | `ov107/mb_fileinfo.c:392` | 0, so `MB_RegisterFile` fails |
+| | `CARD_GetOwnRomHeader`, `CARDi_GetRomCacheBuffer`, `_start_AutoloadDoneCallback` | `MB_ReadSegment` | NULL / no-op |
+| WFC setup, Download Play files | `FS_OpenFileEx`, `FS_GetFileLength`, `FS_GetFilePosition`, `FS_GetFileImageTop`, `FS_GetArchiveBase` | `ov016/archive.c`, `ov107/mb_fileinfo.c`, `mb_gameinfo.c` | FALSE / 0 / NULL |
+| WFC setup font | `NNS_G2dCharCanvasInitForVRAM`, `NNSi_G2dCharCanvasDrawChar`, `NNSi_G2dInitPenSimple`, `NNSi_G2dCalcCharAreaSize`, `NNSi_G2dMakeCharObjArea`, `NNSi_G2dCalcTextBox`, `NNSi_G2dAlignTextVertical` | `ov016/font.c` | no-op / 0 |
+| WFC network (ov114) | `CRYPTOi__bn_{add,sub,mul,mul_add,sqr,div}_words` | `ov114/crypto_bobj1.c` | 0 (a real WFC session would compute wrong bignums; it cannot start without a connection) |
+| DSi DSP | `DSP_InitProcessContext`, `DSP_ExecuteProcess`, `DSP_QuitProcess`, `DSP_FindProcess` | `twl/dsp_g711.c`, `twl/dsp_util.c` | 0 / NULL; callers return early (`dsp_util.c:120-123`, `dsp_g711.c:53`) |
+
+The FS functions are real NitroSDK functions on the DS that sinjoh provides
+only as header inlines (`nitro/fs/file.h:267`, `nitro/fs/archive.h:155`) or not
+at all. Today only wireless code calls them. If a non-wireless caller appears,
+it shows up in the unimplemented log, and the fix is a real implementation over
+sinjoh's `FSFile`, not a wider stub.
+
+A future port of these features needs, at minimum:
+- a UDS-backed `WM`/`MB` layer, or a design decision that local multiplayer is
+  3DS-to-3DS only;
+- an HTTPS replacement for the DWC stack (ov009, ov016, ov114), since the
+  original Nintendo WFC servers are gone;
+- a C translation of the `crypto_bobj2.c` bignum words, in the same way as
+  `MATH_QSort`.
+
 ## Open blockers
 
 - No physical Old 3DS in this environment. LOTUS and Azahar are integration
   debuggers, not timing authorities. All M0 claims are emulator-tested at most.
-- The generated data image is a link-time artifact. Zero-filled definitions
-  cover BSS/runtime addresses; M2 must place all data at its real DS addresses
-  before the image can be considered game-correct.
 - Aletheia's `arm9data.py` needs the DSi modcrypt key-scrambler constant to
   decrypt `arm9i.bin` and generate `twl_0272EB9C.inc`. `tools/modcrypt.py:26-46`
   documents that it lives in AES hardware, not in BIOS or firmware ROM. The
