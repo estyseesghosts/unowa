@@ -283,6 +283,27 @@ reaches the display, which is a prerequisite for M3/M4. LOTUS at 1800 frames:
 and bottom (24,16,24) — the renderer's clear colours. Game graphics still need
 M3/M4.
 
+### Data pointer relocation
+
+ROM-backed data is emitted verbatim, so its stored DS pointers point into
+unmapped DS space on the 3DS. The first concrete fault was `_ArcPathTable`
+(`gfl_use.c:861`, 235 entries), whose entries name the `a/0/0/N` archive paths
+held inside the `PIo2` array; `FS_NormalizePath` dereferenced the raw
+`0x020A6BB0` and stopped the guest. `tools/gen_data_image.py` now emits
+`unowa_ds_relocate()` / `unowa_gv_relocate()`: a table of (slot, target array +
+offset) pairs that rewrites each stored *data* pointer to the emitted array that
+holds the bytes it names. It runs in `main()` before `NitroMain()`.
+
+The pass covers the ARM9 static region only, whose addresses are unique. The
+generated image reports 292 relocations (235 of them `_ArcPathTable`) and 895
+skipped words, which are Thumb/ARM code pointers (bit 0 set, or no data target)
+and are deliberately left alone: function-pointer relocation needs a DS address
+to compiled-symbol map. Overlay-internal pointers are also untouched, because
+237 overlays share 58 load slots and cannot be disambiguated until the overlay
+packaging work. Verified in LOTUS: `_ArcPathTable[0]` reads `PIo2 + 0x708` at
+runtime, exactly `0x020A6BC0 - 0x020A64B8`, and the boot no longer stops on the
+`0x020A6BB0` unmapped read.
+
 Result: `lotus_run_until` reaches 1200 frames with `last_error` empty, four
 live guest threads, and `unowa_overlay_log_count == 6`. The log records the
 `GF_OVERLAY_Load` calls reached during boot. Those handles are the *addresses*

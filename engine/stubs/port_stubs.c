@@ -497,6 +497,39 @@ void unowa_handle_nvram(int tag, u32 data, BOOL err)
     (void)NitroPort_Arm7Reply(4, 0, 0);
 }
 
+/* Content pack bridge (kj_bridge.h:35-37). The M1 entry skips sinjoh's usual
+ * kj_ds_open_pack call, so game-card archive reads (e.g. MSGDATA_ReadString at
+ * arm9/msgdata.c:304) have no files to read and hang. Open the B/W v1 pack
+ * with our own build id; the pack holds the player's extracted NitroFS files.
+ */
+extern int NitroPort_OpenPak(const char *pak_path, const char *manifest_path,
+                             const char *expected_build_id);
+
+/* Result of the pack open, kept in guest memory so LOTUS can read it (the M1
+ * entry does not start the async log). 0 = ok, otherwise a PakResult. */
+int unowa_pack_result = -1;
+
+const char *kj_ds_open_pack(const char *pak_path, const char *manifest_path)
+{
+    unowa_pack_result = NitroPort_OpenPak(pak_path, manifest_path, "unowa-nitrofs-1");
+    switch (unowa_pack_result) {
+    case 0: /* PAK_OK */
+        return NULL;
+    case 2: /* PAK_ERR_IO */
+        return "cannot read the data pack or its manifest";
+    case 3: /* PAK_ERR_FORMAT */
+        return "the data pack or its manifest is damaged, or they do not belong together";
+    case 4: /* PAK_ERR_VERSION */
+        return "the data pack was made by a different version of the pack builder";
+    case 5: /* PAK_ERR_BUILD_ID */
+        return "the data pack is for the wrong game";
+    case 6: /* PAK_ERR_ROM_SHA1 */
+        return "the data pack was made from a ROM this version does not support";
+    default:
+        return "cannot open the data pack";
+    }
+}
+
 /* DS ROM read-protection check (fs_proc_rom.h:10); unowa reads from SD. */
 int FSi_IsUnreadableRomOffset(void *arc, u32 offset)
 {

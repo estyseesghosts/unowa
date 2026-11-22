@@ -154,7 +154,8 @@ $(PORT_IOREG_H): $(GAME)/sdk_ioreg.h tools/gen_port_ioreg_header.py
 $(OUT)/gen/ds_data.o: $(OUT)/probe-undefined.txt
 	@mkdir -p $(dir $@)
 	@python3 tools/gen_data_image.py --aletheia $(ALETHEIA_DIR) \
-	    --undefined $< --out $(OUT)/gen/ds_data.c
+	    --undefined $< --out $(OUT)/gen/ds_data.c \
+	    --reloc-name unowa_ds_relocate
 	@$(DEVKITARM)/bin/arm-none-eabi-gcc $(PORT_CFLAGS) -Wno-unused-const-variable \
 	    -c $(OUT)/gen/ds_data.c -o $@
 
@@ -219,7 +220,8 @@ $(OUT)/gen/ds_data_gv.o: $(OUT)/probe-gv-undefined.txt $(OUT)/probe-undefined.tx
 	@LC_ALL=C sort $< > $(OUT)/u-gv.sorted
 	@LC_ALL=C comm -13 $(OUT)/u-base.sorted $(OUT)/u-gv.sorted > $(OUT)/u-gv-extra.txt
 	@python3 tools/gen_data_image.py --aletheia $(ALETHEIA_DIR) \
-	    --undefined $(OUT)/u-gv-extra.txt --out $(OUT)/gen/ds_data_gv.c
+	    --undefined $(OUT)/u-gv-extra.txt --out $(OUT)/gen/ds_data_gv.c \
+	    --reloc-name unowa_gv_relocate
 	@$(DEVKITARM)/bin/arm-none-eabi-gcc $(PORT_CFLAGS) -Wno-unused-const-variable \
 	    -c $(OUT)/gen/ds_data_gv.c -o $@
 
@@ -241,7 +243,7 @@ $(OUT)/obj/engine/%.o: engine/%.c
 
 $(OUT)/gen/m1_main.o:
 	@mkdir -p $(dir $@)
-	@printf 'typedef unsigned int u32;\ntypedef int BOOL;\nextern void NitroMain(void);\nextern void NitroPort_InitArm7Services(void);\nextern void NitroPort_SetArm7Handler(int tag, void (*handler)(int, u32, BOOL));\nextern void unowa_handle_nvram(int tag, u32 data, BOOL err);\nextern void gfxInitDefault(void);\nextern int unowa_renderer_init(void);\nint main(void) { gfxInitDefault(); if (!unowa_renderer_init()) { return 1; } NitroPort_InitArm7Services(); NitroPort_SetArm7Handler(4, unowa_handle_nvram); NitroMain(); return 0; }\n' > $(OUT)/gen/m1_main.c
+	@printf 'typedef unsigned int u32;\ntypedef int BOOL;\nextern void NitroMain(void);\nextern void NitroPort_InitArm7Services(void);\nextern void NitroPort_SetArm7Handler(int tag, void (*handler)(int, u32, BOOL));\nextern void unowa_handle_nvram(int tag, u32 data, BOOL err);\nextern const char *kj_ds_open_pack(const char *pak, const char *manifest);\nextern void kj_log(const char *fmt, ...);\nextern void gfxInitDefault(void);\nextern int unowa_renderer_init(void);\nextern void unowa_ds_relocate(void);\nextern void unowa_gv_relocate(void);\nint main(void) { gfxInitDefault(); if (!unowa_renderer_init()) { return 1; } NitroPort_InitArm7Services(); NitroPort_SetArm7Handler(4, unowa_handle_nvram); unowa_ds_relocate(); unowa_gv_relocate(); const char *e = kj_ds_open_pack("sdmc:/3ds/unowa/data/black.pak", "sdmc:/3ds/unowa/data/black.manifest.json"); if (e) { kj_log("[pack] %%s", e); return 2; } NitroMain(); return 0; }\n' > $(OUT)/gen/m1_main.c
 	@$(DEVKITARM)/bin/arm-none-eabi-gcc $(PORT_CFLAGS) -c $(OUT)/gen/m1_main.c -o $@
 
 $(OUT)/m1-test.elf: $(OUT)/gen/m1_main.o $(OUT)/probe-gv-undefined.txt \
