@@ -450,15 +450,104 @@ singleton, not a net-lifecycle write. LOTUS write watchpoints are available
 single-instruction dispatch, which makes the window from frame 15 to the fault
 take tens of minutes, so the writer is still unidentified.
 
-The save read itself is the next thing to fix. `CARD_LockBackup`,
-`CARD_IdentifyBackup`, `CARDi_RequestStreamCommand` and `CARD_WaitBackupAsync`
-all resolve into sinjoh's real NitroSDK `card_backup.c` (0x15bbbc..0x15c07c),
-which drives the DS card bus. On 3DS that bus does not exist, so identification
-and the read fail and `FLASH_ACCESS_Read` calls `on_error`. Kohjoh's port
-solves the same problem with a `Platform_StoreSaveFile` bridge in
-`build/forwarder-reference/3ds_port/src/3ds_game_bridge.c`; unowa needs the
-equivalent at the `CARD_*` boundary, or a clean "no save data" answer that does
-not open the shutdown screen.
+The save read itself was the next thing to fix, and it is fixed (below).
+
+### The backup device
+
+`CARD_LockBackup`, `CARD_IdentifyBackup`, `CARDi_RequestStreamCommand` and
+`CARD_WaitBackupAsync` resolved into sinjoh's real NitroSDK `card_backup.c`,
+which drives the DS card bus. ARM11 has no such bus, so identification and the
+read failed and `FLASH_ACCESS_Read` called `on_error`, which is
+`APP_POWER_ClearCallback`: the power-off screen.
+
+`engine/stubs/card_backup_port.c` replaces every export of that object (eleven
+functions) with the same device: a 512 KiB flash image mirrored to the port's
+own save path. `SAVE_CONTROL` asks for `CARD_BACKUP_TYPE_FLASH` 4 Mbit, any
+vendor (`0x00ff1302`), and reads its last page (`0x7F800`, 884 bytes), so 512
+KiB is the size and a missing file starts as erased flash (`0xFF`) — which is
+what a cartridge that was never saved to looks like. Reads and writes are
+applied at the address the request names, and each write range is written back
+to the file, so a save does not need a whole-image flush.
+
+The object is the first object in the link group (engine/game.mk), so its
+`CARD_*` definitions are visible before the archives are scanned; otherwise ld
+pulls the DS version out of `libnitro.a` for the same symbols.
+
+Verified in LOTUS: `SAVE_CONTROL_Create` no longer opens the shutdown screen.
+The stack now reads
+
+```
+SAVE_CONTROL_Create -> BACKUP_SYSTEM_Create -> BACKUP_SYSTEM_CreateCore
+  -> SAVEDATA_CreateTable -> SAVEDATA_BuildLayout -> SAVEDATA_QueryBlockSize
+```
+
+and the next failure was a call through the main save block table.
+
+### Overlay function pointers in typed data
+
+The main save block table is a run of `{ id, size_func, init_func }` records at
+`0x0209DA28`. Entry 51 holds `0x0216E475`/`0x0216E47D`, two Thumb functions in
+ov010 (`FLDMMDL_GetMovedPosSaveSize` / `FLDMMDL_InitMovedPosSave`). The
+function-pointer pass only covered ARM9, so the call went to a DS address and
+faulted.
+
+Rewriting a stored overlay address everywhere is not safe: 237 overlays share
+58 load slots, and 6228 words in ARM9 data happen to equal an overlay function
+start (a version string, a certificate blob). The pass now rewrites an overlay
+pointer only when the word sits in an object that Aletheia's
+`layout/data_objects.json` types as holding pointers (`kind` struct or a
+`targets` list). Under that rule exactly two words qualify, and they are the
+two save-layout functions above. `--gc-sections` had dropped those functions;
+the new references keep them and both are `T` in `m1-test.elf` at
+`0x00138600`/`0x00138608`.
+
+### The DS shared work area
+
+`MYSTERY_DATA_EncryptBuffer` first faulted reading the DS V-blank counter at
+`0x02FFFC3C`. The previous session patched readers one file at a time
+(`mystery_data.c`, `field_g3d_mapper.c`, `p_status.c`, `record.c`, `pm.c`);
+the next boot stopped at a sixth, `SYMBOL_SAVE_UpdateChecksum`. Aletheia has
+about 130 code sites in 59 files that name the same 4 KiB area by literal
+(`0x02FFFxxx`, or its NTR mirror `0x027FFxxx`): the V-blank counter, X/Y and
+lid bits (`0x02FFFFA8`), the cartridge header copy (`0x02FFFE00`), owner info
+(`0x02FFFC80`), lock words.
+
+The area cannot be mapped at its DS address: `0x00100000-0x04000000` is the
+3DS executable window and `MapMemoryBlock` only maps at `0x08000000`
+(coffeepot `ctr/hardware/memory.md`, ARM11 userland virtual map). sinjoh
+already shadows it at `NitroPort_MainMem + 0x7FF000` (NitroSDK
+`mmap_shared.h:40`) and fills it: `NitroPort_SetButtons` writes
+`HW_BUTTON_XY_BUF` (`port_boot.c:93`), boot copies the ROM header into
+`HW_ROM_HEADER_BUF` (`port_boot.c:33-40`).
+
+`tools/patch_sources.py` now rewrites every such literal in code (comments and
+strings skipped) to `((unsigned int)NitroPort_MainMem + 0x7FFxxx)`. Header
+macros that expand to one (`HW_BUTTON_XY_BUF` in `touchpanel_shared_types.h`
+and `ov013/vct_types.h`) are overridden after the including file's last
+`#include`. `engine/game.mk` asks the tool (`--list-shared`) for the affected
+files and patches every compiled one, game and Gen V; the five per-file
+V-blank fixups are gone. Patched copies are compiled with `-iquote` on their
+original directory so quoted includes resolve as they did before the copy,
+and depend on `patch_sources.py`, so a change to the tool rebuilds them.
+
+The counter itself: the DS ARM7 advances it (NitroSDK `os_irqTable.c:168` is
+`SDK_ARM7` only), so nothing on the port did. `NitroPort_OnFrame` now
+increments the shadow word, and `unowa_vblank_count` is removed: sinjoh's
+`OS_GetVBlankCount` and the game read one counter.
+
+Verified: no `0x02FFFxxx` constant remains in `m1-test.elf` code
+(`SYMBOL_SAVE_UpdateChecksum` loads through the shadow). In LOTUS the boot
+passes the counter readers, `SAVE_CONTROL_Create`, `CONFIG_ApplyTextLanguage`
+and `GFL_NET_ERR_Init`, and stops at frame 16 in `GFL_HEAP_Alloc` reading
+`0x020A7234`: `net_err.c:468` passes the ARM9 *data* address of its file-name
+string as `(const void *)0x020A7234`. That is a main-RAM literal outside the
+shared area; see "Data model" below.
+
+The save device is not a stub: `sdmc:/3ds/unowa/saves/<edition>.sav` (the path
+`storage/paths.c` already defines) is created at 512 KiB of `0xFF` on first use
+and grows the game's own blocks as it writes them. A secondary LOTUS session
+keeps its own copy of that file, which is why a test run does not touch the
+primary card's save.
 
 Kohjoh and sinjoh were audited for reusable work; the decisions and citations
 are in `docs/reuse-audit.md`.

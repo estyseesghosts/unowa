@@ -116,27 +116,78 @@ def function_addresses(aletheia, compiled):
     """Map stored pointer value -> port symbol name, for uniquely named code.
 
     Aletheia's function_addrs.tsv gives one row per function: region, address,
-    name, ISA, size, source file, static flag. Only ARM9-region, non-static
-    functions from compiled files are usable: overlay addresses are shared
-    between files, static functions have no external symbol, and a skipped
-    file has no port object.
+    name, ISA, size, source file, static flag. Only non-static functions from
+    compiled files are usable: static functions have no external symbol and a
+    skipped file has no port object. The value stored in ROM carries the ISA
+    bit, so a Thumb function matches the odd address.
+
+    Returns `(arm9, other)`: `arm9` maps value -> name for the ARM9 region,
+    `other` maps value -> name for every other region (overlays, twl). An
+    address with more than one name is dropped from both, because a stored
+    value cannot say which of them it meant.
     """
     table = aletheia / "layout" / "function_addrs.tsv"
-    result = {}
+    names = {}
+    regions = {}
     conflicts = set()
     lines = table.read_text(encoding="utf-8").splitlines()
     for line in lines[1:]:
         region, address, name, isa, _size, source, static = line.split("\t")
-        if region != "arm9" or static != "no" or source not in compiled:
+        if static != "no" or source not in compiled:
             continue
         value = int(address, 16) | (1 if isa == "thumb" else 0)
-        if value in result and result[value] != name:
+        if value in names and names[value] != name:
             conflicts.add(value)
             continue
-        result[value] = name
+        names[value] = name
+        regions[value] = region
     for value in conflicts:
-        del result[value]
-    return result
+        del names[value]
+    arm9 = {v: n for v, n in names.items() if regions[v] == "arm9"}
+    other = {v: n for v, n in names.items() if regions[v] != "arm9"}
+    return arm9, other
+
+
+def pointer_typed_objects(aletheia):
+    """DS address ranges that Aletheia's data analysis types as holding pointers.
+
+    `layout/data_objects.json` types each ARM9 data object it has analysed:
+    `kind` is `struct`, `numeric`, `string`, `raw` and so on, `fields` lists the
+    field sizes/types of a struct, and `targets` lists the values its pointer
+    fields hold. An object with a `ptr` field or a `targets` list is known to
+    contain pointers, so a word in it that equals a unique function start is a
+    function pointer rather than a coincidence.
+
+    That distinction matters for overlay functions: the bytes of a version
+    string or a certificate blob occasionally equal a real overlay address
+    (6228 such words across the ARM9 data), and rewriting those would corrupt
+    them. Returns a sorted list of (start, end) so a lookup is a bisect.
+    """
+    path = aletheia / "layout" / "data_objects.json"
+    if not path.exists():
+        return []
+    data = json.loads(path.read_text())
+    objects = data.get("regions", {}).get("arm9", {}).get("objects", [])
+    spans = []
+    for obj in objects:
+        fields = obj.get("fields") or []
+        has_ptr = any(field[0] == "ptr" for field in fields) or bool(obj.get("targets"))
+        if not has_ptr:
+            continue
+        start = int(obj["addr"], 16)
+        spans.append((start, start + int(obj["size"])))
+    spans.sort()
+    return spans
+
+
+def pointer_typed(starts, spans, address):
+    """True when `address` lies in an object typed as holding pointers."""
+    index = bisect.bisect_right(starts, address) - 1
+    if index < 0:
+        return False
+    _start, end = spans[index]
+    return address < end
+
 
 
 def region_images(aletheia):
@@ -245,7 +296,7 @@ def object_groups(datas):
 
 
 def generate(undefined, symbols, regions, arm9_base, modules, functions,
-             out_path, reloc_name):
+             overlay_functions, aletheia, out_path, reloc_name):
     """Write C definitions for data symbols found in the ROM images."""
     datas = sorted(
         (addr, name, source) for name, (addr, kind, source) in symbols.items()
@@ -334,9 +385,14 @@ def generate(undefined, symbols, regions, arm9_base, modules, functions,
             lines.append("")
         zero_filled.append(name)
 
-    # Relocate stored pointers. Only the ARM9 static region is handled: its
-    # addresses are unique, whereas overlays share 58 load slots across 237
-    # files and cannot be disambiguated until overlay packaging.
+    # Relocate stored pointers. ARM9 addresses are unique and are handled
+    # everywhere. Overlay addresses are not: 237 overlays share 58 load slots,
+    # so the same number names different functions in different overlays. A
+    # stored overlay address is therefore only rewritten when the word sits in
+    # an object Aletheia's data analysis types as holding pointers, where the
+    # value is known to be a function pointer rather than bytes that happen to
+    # match one. That is what finds the two save-layout functions in
+    # `_ExtraSaveDescs` (FLDMMDL_GetMovedPosSaveSize / InitMovedPosSave, ov010).
     #
     # Walk 4-byte words at addresses aligned in DS space, not at array-relative
     # offsets: 254 of the emitted objects start at a non-multiple of 4, and a
@@ -348,6 +404,8 @@ def generate(undefined, symbols, regions, arm9_base, modules, functions,
         if in_arm9
     )
     arm9_starts = [span[0] for span in arm9_spans]
+    pointer_spans = pointer_typed_objects(aletheia)
+    pointer_starts = [span[0] for span in pointer_spans]
     relocs = []
     skipped = 0
     fnptrs = []
@@ -359,6 +417,11 @@ def generate(undefined, symbols, regions, arm9_base, modules, functions,
             value = int.from_bytes(data[offset:offset + 4], "little")
             function = functions.get(value)
             if function is not None:
+                fnptrs.append((name, offset, function, value))
+                continue
+            function = overlay_functions.get(value)
+            if function is not None and pointer_typed(pointer_starts, pointer_spans,
+                                                      address + offset):
                 fnptrs.append((name, offset, function, value))
                 continue
             if not 0x02000000 <= value < 0x03000000:
@@ -464,10 +527,10 @@ def main():
     symbols = symbol_addresses(args.aletheia)
     regions, arm9_base, bounds = region_images(args.aletheia)
     compiled = compiled_sources(args.aletheia)
-    functions = function_addresses(args.aletheia, compiled)
+    functions, overlay_functions = function_addresses(args.aletheia, compiled)
     written, zero_filled, relocs, skipped, fnptrs = generate(
-        undefined, symbols, regions, arm9_base, bounds, functions, args.out,
-        args.reloc_name)
+        undefined, symbols, regions, arm9_base, bounds, functions,
+        overlay_functions, args.aletheia, args.out, args.reloc_name)
     print("generated %d ROM-backed and %d zero-filled data symbols in %s"
           % (len(written), len(zero_filled), args.out))
     print("  %s: %d data pointers relocated, %d non-data/out-of-range words skipped"

@@ -86,6 +86,12 @@ PATCHED := ov009/wcm_wmif.c ov013/vct_audio.c twl/nwmif.c \
            twl/dsp_pipe.c arm9/scfg_proc.c ov094/btlv_input.c \
            ov119/pokemontrade_2d.c twl/pm.c arm9/gf_overlay.c \
            ov010/event_wifi_proc.c
+# Every compiled TU that names the DS shared work area (0x02FFFxxx/0x027FFxxx)
+# is patched too: tools/patch_sources.py redirects those literals to sinjoh's
+# shadow at NitroPort_MainMem + 0x7FF000 (see SHARED_LITERAL there).
+SHARED_SRCS := $(shell python3 tools/patch_sources.py --source $(GAME) --list-shared)
+PATCHED += $(filter $(patsubst $(GAME)/%,%,$(GAME_SRCS)),$(SHARED_SRCS))
+PATCHED := $(sort $(PATCHED))
 PATCHED_OBJS := $(patsubst %.c,$(OUT)/obj/%.o,$(PATCHED))
 NORMAL_OBJS  := $(filter-out $(PATCHED_OBJS),$(GAME_OBJS))
 
@@ -100,6 +106,8 @@ GV_OBJS   := $(patsubst %.c,$(OUT)/gv_raw/%.o,$(GV_SRCS))
 # biginteger.c is C apart from three Metrowerks limb readers, which the port
 # supplies in engine/stubs/port_stubs.c. Remove those asm bodies at build time.
 GV_PATCHED := ov009/biginteger.c arm9/pm.c arm9/os_alloc.c
+GV_PATCHED += $(filter $(GV_SRCS),$(SHARED_SRCS))
+GV_PATCHED := $(sort $(GV_PATCHED))
 GV_PATCHED_OBJS := $(patsubst %.c,$(OUT)/gv_raw/%.o,$(GV_PATCHED))
 GV_RAW_OBJS := $(filter-out $(GV_PATCHED_OBJS),$(GV_OBJS))
 GV_LIB    := $(OUT)/libunowa_gv.a
@@ -246,18 +254,19 @@ $(OUT)/obj/engine/%.o: engine/%.c
 
 $(OUT)/gen/m1_main.o:
 	@mkdir -p $(dir $@)
-	@printf 'typedef unsigned int u32;\ntypedef int BOOL;\nextern void NitroMain(void);\nextern void NitroPort_InitArm7Services(void);\nextern void NitroPort_SetArm7Handler(int tag, void (*handler)(int, u32, BOOL));\nextern void unowa_handle_nvram(int tag, u32 data, BOOL err);\nextern const char *kj_ds_open_pack(const char *pak, const char *manifest);\nextern void kj_log(const char *fmt, ...);\nextern void gfxInitDefault(void);\nextern int unowa_renderer_init(void);\nextern void unowa_ds_relocate(void);\nextern void unowa_gv_relocate(void);\nint main(void) { gfxInitDefault(); if (!unowa_renderer_init()) { return 1; } NitroPort_InitArm7Services(); NitroPort_SetArm7Handler(4, unowa_handle_nvram); unowa_ds_relocate(); unowa_gv_relocate(); const char *e = kj_ds_open_pack("sdmc:/3ds/unowa/data/black.pak", "sdmc:/3ds/unowa/data/black.manifest.json"); if (e) { kj_log("[pack] %%s", e); return 2; } NitroMain(); return 0; }\n' > $(OUT)/gen/m1_main.c
+	@printf 'typedef unsigned int u32;\ntypedef int BOOL;\nextern void NitroMain(void);\nextern void NitroPort_InitArm7Services(void);\nextern void NitroPort_SetArm7Handler(int tag, void (*handler)(int, u32, BOOL));\nextern void unowa_handle_nvram(int tag, u32 data, BOOL err);\nextern const char *kj_ds_open_pack(const char *pak, const char *manifest);\nextern void kj_log(const char *fmt, ...);\nextern void gfxInitDefault(void);\nextern int unowa_renderer_init(void);\nextern void unowa_ds_relocate(void);\nextern void unowa_gv_relocate(void);\nextern void *unowa_paths_init(void);\nint main(void) { gfxInitDefault(); unowa_paths_init(); if (!unowa_renderer_init()) { return 1; } NitroPort_InitArm7Services(); NitroPort_SetArm7Handler(4, unowa_handle_nvram); unowa_ds_relocate(); unowa_gv_relocate(); const char *e = kj_ds_open_pack("sdmc:/3ds/unowa/data/black.pak", "sdmc:/3ds/unowa/data/black.manifest.json"); if (e) { kj_log("[pack] %%s", e); return 2; } NitroMain(); return 0; }\n' > $(OUT)/gen/m1_main.c
 	@$(DEVKITARM)/bin/arm-none-eabi-gcc $(PORT_CFLAGS) -c $(OUT)/gen/m1_main.c -o $@
 
 $(OUT)/m1-test.elf: $(OUT)/gen/m1_main.o $(OUT)/probe-gv-undefined.txt \
-                    $(OUT)/gen/ds_data.o $(OUT)/gen/ds_data_gv.o $(ENGINE_OBJS)
+                    $(OUT)/gen/ds_data.o $(OUT)/gen/ds_data_gv.o $(ENGINE_OBJS) \
+                    $(OUT)/gen/card_backup_port.o
 	@$(DEVKITARM)/bin/arm-none-eabi-gcc -march=armv6k -mtune=mpcore \
 	    -mfpu=vfp -mfloat-abi=hard -mtp=soft -mword-relocations \
 	    -fno-short-enums -D__3DS__ -specs=3dsx.specs \
 	    -L$(DEVKITPRO)/libctru/lib -Wl,--gc-sections \
 	    -Wl,--no-enum-size-warning -Wl,--wrap=NitroPort_Unimplemented \
 	    -Wl,--wrap=OS_Terminate \
-	    -Wl,--start-group $< $(GAME_REN) $(GV_LIB) \
+	    -Wl,--start-group $< $(OUT)/gen/card_backup_port.o $(GAME_REN) $(GV_LIB) \
 	    $(NITRO)/build/3ds/libnitro.a \
 	    $(NNS)/build/3ds/libnitrosystem.a \
 	    $(OUT)/gen/ds_data.o $(OUT)/gen/ds_data_gv.o $(REN_DIR)/kj_g3.o \
@@ -320,10 +329,13 @@ $(OUT)/src/ov010/event_wifi_proc.c: $(GAME)/ov010/event_wifi_proc.c
 	@python3 tools/patch_sources.py --source $(GAME) --out $(OUT)/src \
 	    --fixup ov020_id_constant ov010/event_wifi_proc.c
 
+# A change to the patcher regenerates every patched copy.
+$(addprefix $(OUT)/src/,$(PATCHED)) $(addprefix $(OUT)/gv_src/,$(GV_PATCHED)): tools/patch_sources.py
+
 $(PATCHED_OBJS): $(OUT)/obj/%.o: $(OUT)/src/%.c | $(PORT_IOREG_H)
 	@mkdir -p $(dir $@)
 	@$(DEVKITARM)/bin/arm-none-eabi-gcc $(PORT_CFLAGS) $(PORT_PRELUDE) \
-	    -I$(GAME)/arm9 -I$(GAME) $(SDK_INCLUDES) \
+	    -iquote $(GAME)/$(dir $*) -I$(GAME)/arm9 -I$(GAME) $(SDK_INCLUDES) \
 	    $(NNS_INCLUDES) $(GAME_INCLUDES) -MMD -MP -MQ"$@" -c $< -o $@
 
 $(NORMAL_OBJS): $(OUT)/obj/%.o: $(GAME)/%.c | $(PORT_IOREG_H)
@@ -335,6 +347,14 @@ $(NORMAL_OBJS): $(OUT)/obj/%.o: $(GAME)/%.c | $(PORT_IOREG_H)
 $(OUT)/gen/port_stubs.o: engine/stubs/port_stubs.c
 	@mkdir -p $(dir $@)
 	@$(DEVKITARM)/bin/arm-none-eabi-gcc $(PORT_CFLAGS) -I$(GAME) -c $< -o $@
+
+# The Gen 5 save device on 3DS, replacing libcard's card_backup.o. It is the
+# first object in the link group so its CARD_* definitions are already visible
+# when the archives are scanned; otherwise ld would pull the DS bus version out
+# of libnitro.a for the same symbols and report a duplicate.
+$(OUT)/gen/card_backup_port.o: engine/stubs/card_backup_port.c
+	@mkdir -p $(dir $@)
+	@$(DEVKITARM)/bin/arm-none-eabi-gcc $(PORT_CFLAGS) -Iengine -c $< -o $@
 
 # Gen V SDK objects, built with the same flags as the game archive.
 $(OUT)/gv_src/%.c: $(GAME)/%.c
@@ -359,7 +379,7 @@ $(OUT)/gv_src/arm9/os_alloc.c: $(GAME)/arm9/os_alloc.c
 $(GV_PATCHED_OBJS): $(OUT)/gv_raw/%.o: $(OUT)/gv_src/%.c | $(PORT_IOREG_H)
 	@mkdir -p $(dir $@)
 	@$(DEVKITARM)/bin/arm-none-eabi-gcc $(PORT_CFLAGS) $(PORT_PRELUDE) \
-	    -I$(GAME)/arm9 -I$(GAME) $(SDK_INCLUDES) \
+	    -iquote $(GAME)/$(dir $*) -I$(GAME)/arm9 -I$(GAME) $(SDK_INCLUDES) \
 	    $(NNS_INCLUDES) $(GAME_INCLUDES) -c $< -o $@
 
 $(GV_RAW_OBJS): $(OUT)/gv_raw/%.o: $(GAME)/%.c | $(PORT_IOREG_H)

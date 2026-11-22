@@ -2,6 +2,12 @@
 
 Repository-wide rules for agent sessions working on kohjoh.
 
+## NEVER WORK WITHOUT LOTUS 
+
+IF YOU CANNOT DRIVE LOTUS OVER MCP, YOU STOP AND TELL THE USER 
+
+YOU DO NOT START INVENTING BULLSHIT SOLUTIONS, YOU DO NOT START DRIVING IT WITH SCRIPTS, YOU STOP IMMEDIATELY.
+
 ## READ THE WIKI 
 
 You're not expected to have deep technical knowledge of the 3DS platform or how to program efficiently for it. This information has been collected for you already. If it isn't already on disk, clone https://github.com/estyseesghosts/coffeepot.git. Always refer to coffeepot's CTR section when you're writing code or planning project changes - read the relevant hardware, firrmware or engineering articles, so you understand what you're working with. If you can't justify a change with real-hardware evidence or a citation from the wiki, you probably should not do it. Never edit coffeepot yourself. If you notice something genuinely incorrect, PR and tell the user. Always follow the wiki's C style guide.
@@ -23,6 +29,10 @@ Every subagent brief must state, in the prompt itself:
 Do not send a subagent a vague goal and let it infer scope. If the lead cannot fill in all six items, the slice is not ready to delegate. A brief that is broader, vaguer or in conflict with `kohjoh.md` should be revised before the call, not discovered by the subagent mid-edit.
 
 Implementer subagents hold `docs/status.md`, `docs/lessons.md` and `kohjoh.md` as required reading; the brief adds the slice-specific detail those files cannot contain. When this file disagrees with an agent definition under `.opencode/agents/` or `.claude/agents/`, this file wins.
+
+## EIDOS
+
+Try not to port solutions directly from Eidos, unless you're sure that's the best or only way to solve a certain problem. Review Eidos to understand how the gen 5 engine works. But our code needs to be much more tightly optimized around much weaker hardware. The old 3DS is very weak hardware - but it is still more powerful than the original hardware this game was intended for. We already pulled it off with Kohjoh and Sinjoh. We can do 30FPS on real o3ds hardware with UNOWA. 
 
 ## Git identity
 

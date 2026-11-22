@@ -411,6 +411,15 @@ enum {
 extern int unowa_renderer_present(unsigned int top_color, unsigned int bottom_color);
 unsigned int unowa_present_count;
 
+/* The DS V-blank counter lives in the shared work area (HW_VBLANK_COUNT_BUF,
+ * DS 0x02FFFC3C). The DS ARM7 advances it (NitroSDK os_irqTable.c:168 is
+ * SDK_ARM7-only), so on the port nothing does unless the virtual ARM7 here
+ * does. sinjoh shadows the area at NitroPort_MainMem + 0x7FF000
+ * (mmap_shared.h:40), and tools/patch_sources.py points every game literal at
+ * the same word, so the SDK's OS_GetVBlankCount and the game agree. */
+extern unsigned char NitroPort_MainMem[];
+#define UNOWA_VBLANK_COUNT (*(volatile unsigned int *)(NitroPort_MainMem + 0x7FFC3C))
+
 void NitroPort_OnFrame(void)
 {
     hidScanInput();
@@ -450,6 +459,7 @@ void NitroPort_OnFrame(void)
     static const unsigned int s_shades[2] = { 0x101830FFu, 0x1B2A4AFFu };
     unowa_renderer_present(s_shades[unowa_present_count & 1u], 0x181018FFu);
     unowa_present_count++;
+    UNOWA_VBLANK_COUNT++;
 }
 
 /*
