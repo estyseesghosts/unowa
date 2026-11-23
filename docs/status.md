@@ -11,8 +11,8 @@ verified on Old 3DS. Do not collapse them.
 | M1 — Game compilation | implemented; compiled; linked; tested headlessly | `link-final` builds `m1-test.3dsx`; see below | boots, then faults on DS I/O in M2 territory |
 | M2 - Native boot | in progress; tested headlessly | game's own `NitroMain` loop now runs one tick per V-blank; 18 overlays; the intro is reached and the DS pad is forwarded (START skips the intro) | 3D scenes and display capture are M3/M4 work |
 | M3 — 2D | implemented for the boot and intro scenes; rendering in LOTUS | DS 2D engine on the PICA: logo, copyright, the full intro movie and the Pokémon Black logo captured; `mainloop` 1194, `presents` 597 over 1200 frames; direct-colour affine BGs read 16-bit bitmaps | text/affine/extended BGs, OBJ, windows, blending, brightness, direct-colour bitmaps; 256-colour bitmap BGs and the wide art remain out |
-| M4 — 3D | in progress | the title's 3D scene renders stably: `unowa_g3_frames` 1067, `verts` 4881 at 4092 frames, `mainloop 4056`, no stop; 5618 frames with START reaching demo state 4 | `DISPCAPCNT` capture is not modelled (later title phases); the start menu is blocked on the voice-completion seam (M5 audio) |
-| M5 — Gameplay | not started | | input, scripts, audio, resources, saves |
+| M4 — 3D | in progress | the title's 3D scene renders stably: `unowa_g3_frames` 1067, `verts` 4881 at 4092 frames, `mainloop 4056`, no stop; 5618 frames with START reaching demo state 4 | `DISPCAPCNT` capture is not modelled (later title phases); lower-screen 3D is drawn from the live layers |
+| M5 — Gameplay | in progress | title demo exits, start menu lists NEW GAME / MYSTERY GIFT / WFC SETTINGS, NEW GAME opens Professor Juniper's intro and the text advances | input, scripts, audio output, resources, saves |
 | M6 — Widescreen | not started | | 400px, camera/culling, WideArt |
 | M7 — Optimization | not started | | hardware profiling, budgets |
 | M8 — Coverage | not started | | full regression corpus |
@@ -805,10 +805,33 @@ The title now responds to START. With LOTUS `buttons` 0x400 the guest's
 to finish: `PM_VOICE_IsSlotActive(work->fanfareHandle)` stays 1 because
 `NNS_SndWaveOutIsPlaying` never sees its wave-out channel go idle
 (`nns_snd_waveout.c:254-268`, channel bit from `SND_GetChannelStatus`).
-LOTUS reports `audio_samples 0` and `audio_focused false`, so the emulated
-sound clock has nothing to advance against. That is the M5 sound seam, not
-a title bug; the start menu cannot be reached until a voice is allowed to
-finish.
+
+### Audio: the ARM7 driver clock (the title's exit)
+
+The port already links sinjoh's virtual ARM7 sound stack: `NitroMain`'s
+`NitroPort_InitArm7Services()` (`engine/app/game_main.c:47`) runs the original
+ARM7 `N7_SND_Init`, and `NitroPort_HandleSound` executes the game's command
+lists. What was missing was the clock. `SND_UpdateSharedWork` only runs inside
+the mixer tick, so with nothing mixing, the started wave-out channel never
+retired: the shared `channelStatus` stayed `0x8000` (channel 15, the title's
+fanfare) and `PM_VOICE_StopFinished` (`gfl_use.c:652`) never cleared the voice.
+
+The fix is sinjoh's proven audio layer, `engine/audio/audio.c` (copied from
+sinjoh 1774be6, GPL-3.0): `kj_audio_init()` opens 32768 Hz stereo NDSP output
+on its own thread, and when NDSP is unavailable it runs the same mixer on a
+silent thread so the chip still advances. `NitroPort_OnFrame` pumps the
+driver's alarm replies (`NitroPort_SoundPumpReplies`, sinjoh
+`engine/runtime/kj_frame.c:162`) and calls `kj_audio_service()`.
+
+LOTUS, 1200 frames after boot: the title demo goes 3 -> 4 -> 5 -> 6 -> 7 and
+`STARTMENU_TitleDemoExit` replaces it, the start menu lists NEW GAME, MYSTERY
+GIFT, NINTENDO WFC SETTINGS, and pressing A on NEW GAME starts the new-game
+script: "Hi there!" / "Welcome to the world of Pokémon!" / "My name is
+Professor Juniper. Everyone calls me the Pokémon Professor!" advance with A
+through frame 4900. Selecting NINTENDO WFC SETTINGS instead faults in
+`DWCi_TSKlInit` (`ov016/task.c:119`) on a NULL task at +0x78, which is the
+unported Nintendo WFC stack (see Wireless stubs), not the menu.
+
 
 
 

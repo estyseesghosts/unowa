@@ -562,12 +562,24 @@ void NitroPort_G3Swap(unsigned int value)
 extern unsigned char NitroPort_MainMem[];
 #define UNOWA_VBLANK_COUNT (*(volatile unsigned int *)(NitroPort_MainMem + 0x7FFC3C))
 
+/* sinjoh's audio layer (engine/audio/audio.c). The sound driver's alarm
+ * replies are PXI messages: delivering them on the game thread is sinjoh
+ * engine/runtime/kj_frame.c:162's contract. */
+extern void NitroPort_SoundPumpReplies(void);
+extern void kj_audio_service(void);
+
 void NitroPort_OnFrame(void)
 {
     /* Pace the game tick to one DS V-blank per physical 3DS V-blank before
      * reading input or presenting. Presentation is throttled to 30 Hz below
      * and never waits for the display, so it cannot slow this tick. */
     unowa_frame_pacing_vblank();
+
+    /* Sound: deliver the ARM7 driver's alarm replies, and clock the DS sound
+     * chip from here only when neither NDSP nor the fallback thread runs
+     * (kj_audio_service returns immediately while either does). */
+    NitroPort_SoundPumpReplies();
+    kj_audio_service();
 
     hidScanInput();
     const unsigned int held = hidKeysHeld();

@@ -24,6 +24,7 @@ typedef int BOOL;
 extern void gfxInitDefault(void);
 extern void *unowa_paths_init(void);
 extern int unowa_renderer_init(void);
+extern int kj_audio_init(void);
 extern void NitroPort_InitArm7Services(void);
 extern void NitroPort_SetArm7Handler(int tag, void (*handler)(int, u32, BOOL));
 extern void unowa_handle_nvram(int tag, u32 data, BOOL err);
@@ -46,6 +47,14 @@ int main(void)
     unowa_frame_pacing_init();
     NitroPort_InitArm7Services();
     NitroPort_SetArm7Handler(NVRAM_PXI_TAG, unowa_handle_nvram);
+    /* Clock the DS sound chip: the compat layer runs the original ARM7
+     * driver, but nothing advances its clock unless the audio output (or
+     * sinjoh's silent fallback thread) mixes. Without it a wave-out
+     * channel never retires, PM_VOICE_StopFinished never stops the title's
+     * fanfare voice, and the title demo waits in state 4 forever. */
+    if (!kj_audio_init()) {
+        kj_log("[audio] no output; the game's sound waits are clocked in software");
+    }
     unowa_flat_boot();
     unowa_boot_firmware();
     pack_error = kj_ds_open_pack("sdmc:/3ds/unowa/data/black.pak",

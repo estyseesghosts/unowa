@@ -62,6 +62,7 @@ TOOLS := $(dir $(lastword $(MAKEFILE_LIST)))../tools
 # once per V-blank and presents one clear picture every other V-blank. This
 # proves the frame loop reaches the display; the G2D/PICA game bridge is M3/M4.
 ENGINE_SRCS := engine/graphics/renderer.c engine/diagnostics/log.c \
+               engine/audio/audio.c \
                engine/graphics/g2d/g2d.c engine/graphics/g2d/wideart_stub.c \
                engine/graphics/g3d/g3d.c engine/graphics/g3d/textures.c \
                engine/graphics/pica/gpu.c \
