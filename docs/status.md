@@ -1278,6 +1278,31 @@ Walking and camera movement outside scripted dialogue are still not
 demonstrated: every D-pad attempt so far occurred while a dialogue or menu
 owned input. Reaching Nuvema Town proper and moving the player remain open.
 
+#### Vertical striping in the Juniper intro (investigating, 2026-11-23)
+
+Reproduced in a fresh LOTUS session on build `883327620f...`: after name
+entry, Professor Juniper's intro shows the three trainer sprites over a green
+background, with regular vertical white lines passing through both the
+background and the characters; the later silhouette sequence shows the same
+lines. Checkpoints `stripe-probe-0..8` and `stripe2-0..5` in that session
+bracket the sequence (`stripe2-2` and `stripe2-4` are the two striped scenes).
+
+Registers in the striped scene: `DISPCNT=0x1b18` (mode 0, BG0/BG1/BG3 and OBJ
+enabled), `BG0CNT=0x0005`, `BG1CNT=0x5d12`, `BLDCNT=0x0941` (alpha blend,
+BG0 first target, OBJ second), `BLDY=0`, no windows enabled. The atlas uses
+`GPU_NEAREST` filtering (`atlas.c:73`).
+
+The 1/16-texel UV inset in `kj_atlas_slot_uv` (`atlas.h:78`) was added to stop
+one-pixel gaps between tile rows; gaps at 8-pixel tile boundaries would
+explain lines on both BG and OBJ showing the white backdrop. An attempt to
+isolate the layer by clearing DISPCNT bits was inconclusive: LOTUS captures
+taken without advancing a frame show the previously presented picture, so
+the register write had not been rendered. No conclusion yet on whether the
+lines are original art (the docs long called this a possible film-strip
+motif) or a quad-seam defect. Comparing against the real ROM in melonDS at
+the same scene is the next decisive test; do not change the atlas UVs or the
+2D quad path until that oracle exists.
+
 #### Missing battle Pokémon sprites (investigating, 2026-11-23)
 
 The battle arena and HP bars render, but the two Pokémon themselves do not.
