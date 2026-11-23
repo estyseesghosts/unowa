@@ -103,6 +103,9 @@ PORT_DEFINED = {
 # Its words are untyped, so only the exact-match rules apply.
 NEVER_POINTER_KINDS = {"string", "numeric"}
 WORD_NUMERIC_ELEMENTS = {"u32", "s32"}
+# Byte/halfword arrays that Aletheia typed from literal-pool evidence but
+# which can hold 32-bit function pointers (map-attr and battle-step tables).
+NARROW_NUMERIC_ELEMENTS = {"u8", "s8", "u16", "s16"}
 
 # An array declaration whose element is a 16-bit scalar:
 # `extern const u16 g_0209EAA0[];`. Byte arrays are not included: Aletheia
@@ -316,6 +319,16 @@ def typed_words(objects, narrow):
         size = int(obj["size"])
         kind = obj["kind"]
         if kind in NEVER_POINTER_KINDS and obj.get("elem") not in WORD_NUMERIC_ELEMENTS:
+            if kind == "numeric" and obj.get("elem") in NARROW_NUMERIC_ELEMENTS:
+                # Aletheia types some 32-bit function tables as byte/halfword
+                # arrays from literal-pool evidence: the map-attribute table
+                # at 0x021D3CE8 is `numeric`/`u16` but holds 0x021AB1AD =
+                # MAP_ATTR_IsGimmickD7, and ov093's battle step table is
+                # `numeric`/`u16` but holds BTL_CLIENT_Step* entries. The word
+                # is reported "maybe_fn": build() relocates it only on an
+                # exact resolve_function() match, never on a value guess.
+                for offset in range((-start) % 4, size - 3, 4):
+                    yield start + offset, "maybe_fn"
             continue
         if start in narrow and kind not in ("pointer_table", "struct"):
             continue
@@ -530,15 +543,38 @@ def build(modules, data_map, rows, functions, statics, native_spans, narrow):
             value = word_at(address)
             if value == 0:
                 continue
+            if how == "maybe_fn":
+                # A word from a narrow (`u8`/`u16`) numeric blob. Relocate only
+                # an exact function entry; resolve_function's window guard
+                # keeps a same-numbered data word of this module from being
+                # rewritten to another overlay's function. Every other word
+                # stays exactly as Aletheia copied it from the ROM.
+                function = resolve_function(value, module["key"], functions,
+                                            (module["ram_start"], module["bss_end"]))
+                if function is not None:
+                    image.native.append((index, address, function, 0))
+                    image.count("function pointers in narrow numeric tables")
+                continue
             if how in ("ptr", "holder"):
                 function = resolve_function(value, module["key"], functions,
                                             (module["ram_start"], module["bss_end"]))
+            elif module["key"] == "arm9":
+                # Untyped ARM9 word: only an exact entry of ARM9 itself. 6228
+                # ARM9 data words happen to equal some overlay's entry, so the
+                # cross-overlay fallback is not safe here (docs/status.md).
+                function = functions.get("arm9", {}).get(value)
             else:
-                # Untyped word: only an exact entry of this module or ARM9.
-                # Other overlays' windows overlap, and 6228 ARM9 data words
-                # happen to equal some overlay's entry (docs/status.md).
-                function = (functions.get(module["key"], {}).get(value)
-                            or functions.get("arm9", {}).get(value))
+                # An untyped word in an overlay may still be a function pointer
+                # into another overlay: ov010's map-attr slope table at
+                # 0x02171490 holds MAP_ATTR_IsSlopeXA (ov021), and ov021's
+                # field-gimmick tables hold functions in ov057. The same
+                # resolve_function guard as ptr/holder applies — exact entry,
+                # no match inside this module's own window, and uniqueness
+                # across overlays — so a numeric word cannot be guessed into
+                # a pointer. Measured 81 new matches, all named function
+                # tables; ARM9 stays conservative above.
+                function = resolve_function(value, module["key"], functions,
+                                            (module["ram_start"], module["bss_end"]))
             if function is not None:
                 image.native.append((index, address, function, 0))
                 image.count("function pointers")

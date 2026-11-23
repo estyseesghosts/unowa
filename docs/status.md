@@ -11,7 +11,7 @@ verified on Old 3DS. Do not collapse them.
 | M1 — Game compilation | implemented; compiled; linked; tested headlessly | `link-final` builds `m1-test.3dsx`; see below | boots, then faults on DS I/O in M2 territory |
 | M2 — Native boot | complete in practice; tested in emulator | game's own `NitroMain` runs one tick per DS V-blank; 15–51 overlays load; the intro, title, new-game flow and first field map all execute original code. See the fault-chain table below. | Hardware verification and host32/3DS checkpoints absent; no exit-criterion blocker remains |
 | M3 — 2D | substantially complete; rendering in LOTUS | DS 2D engine on the PICA: logos, copyright, full intro movie, title, start menu, name entry and field text/banners captured. Direct-colour affine BGs, OBJ, windows, blending and brightness work. | 256-colour bitmap BGs, WideArt side bands, intro vertical striping unvalidated; no full oracle corpus |
-| M4 — 3D | in progress; major slice working in LOTUS | title 3D scene and lower-screen VRAM-display mode render; Nuvema Town field renders in 3D. New build reaches `mainloop` 25,759 with `g3_frames` 10,621, `g3_verts` 5,390 at field entry, overlay log 47→51. | `DISPCAPCNT` is approximated by live layers; flat BG VRAM view ignores bank remapping; title phase-2 shading not oracle-verified; battle/field coverage minimal |
+| M4 — 3D | in progress; major slice working in LOTUS | title 3D scene and lower-screen VRAM-display mode render; Nuvema Town field map loads and the game runs stably to `mainloop` 32,154 with the overlay log at 51, but the top screen is stuck in a full white fade with no 3D geometry (OPEN "Field stall" below). | `DISPCAPCNT` is approximated by live layers; flat BG VRAM view ignores bank remapping; title phase-2 shading not oracle-verified; battle/field coverage minimal |
 | M5 — Gameplay | early in progress | title → start menu → NEW GAME → gender/name entry → Juniper/Cheren/Bianca intro → first field map, all driven by LOTUS D-pad/touch. Save device and ARM7 sound clock work. | Walking/collision/camera, save/continue, battles, most menus/scripts, real audio output. Next known limitation: 4 of 15 `gWeatherTable` taskParams for other weather kinds remain raw; recorded below |
 | M6 — Widescreen | not started | | 400px, camera/culling, WideArt |
 | M7 — Optimization | not started | | hardware profiling, budgets |
@@ -1072,3 +1072,65 @@ fault and must be fixed with its own evidence (Aletheia declares
 `WeatherEntry.taskParam` as `struct WeatherKindDef *` in `ov021/weather.c:84`,
 but the object map does not encode that type). Left as a documented limitation
 rather than guessing.
+
+### Field stop 6 — function tables Aletheia typed as narrow arrays (FIXED)
+
+Driving past stop 5 found two more raw DS code addresses, both function tables
+whose Aletheia object type hides them from the generator.
+
+- At `mainloop` 26,290, after the intro dialogue, `exception 12` at PC
+  `0x021AB1AC` = `MAP_ATTR_IsGimmickD7` (ov021). The raw word is at
+  `0x021D3CE8`, typed `numeric`/`u16`, `count=3`, `ev=pool`; `typed_words()`
+  skipped it because `u16` is not a `WORD_NUMERIC_ELEMENT`. The surrounding
+  bytes are an 8-byte-strided table of function pointer + attribute mask
+  (`0x021AB1A1/0x276A0000`, `0x021AB1AD/0xFFFF0009`, `0x021AB1B9/...`), so the
+  u16 typing is from literal-pool evidence, not the real layout.
+- After that was fixed, holding South in the field hit `exception 12` at PC
+  `0x021AB4A4` = `MAP_ATTR_IsSlopeXA` (ov021). Its raw words are at
+  `0x02171490..0x021714AC`, typed `numeric`/`u32`, `ev=pool`: the `maybe`
+  branch only looked up this module and ARM9, but the target is ov021 and the
+  word lives in ov010.
+
+**Two measured rules.** `gen_flat_image.py` now:
+
+1. Yields `"maybe_fn"` words from `numeric` objects whose `elem` is
+   `u8/s8/u16/s16` (`NARROW_NUMERIC_ELEMENTS`). `build()` relocates one only on
+   an exact `resolve_function()` match. Measured 206 matches in 17,242 aligned
+   words; samples are real vtables/dispatch tables (`GFL_NET_STATE_*`,
+   `MSL_CONSOLE_IO_*`, the full `MAP_ATTR_IsGimmick*` table, ov093's
+   `BTL_CLIENT_Step*` command table, `FIELD_GIMMICK_MODEL_SCENE_*`).
+2. Uses `resolve_function()` with its full window/uniqueness guard for `maybe`
+   words in overlays, keeping ARM9 conservative. The documented reason for the
+   conservative rule is 6,228 ARM9 data words that coincide with overlay
+   entries; overlays do not have that problem. Measured 81 new matches in
+   14,824 overlay `maybe` words: `SCRCMD_*` cleanup tables (ov010), the
+   `MAP_ATTR_IsSlope*` table (ov010), ov021's `FIELD_GIMMICK_*` and `ENCEFF_*`
+   tables, all named function tables. ARM9 is unchanged.
+
+Rebuilt 5,439,448 bytes, SHA-256
+`66ce357a177ed882b21c71718bd88dc2e3465eea71b2da5a50055b2c4ed97ab5`:
+`function pointers` 7,216 → 7,297 (+81), plus 206 narrow-table pointers,
+`flat data pointers` and the 44 struct-interior data pointers unchanged.
+`addr2line`/`nm` confirm `MAP_ATTR_IsGimmickD7` and
+`BTL_CLIENT_StepPlayMultiMonAnim` are now in the ELF.
+
+LOTUS fresh secondary session: the same input reaches `mainloop` 22,158, then
+runs without a stop to 32,154 under continuous dialogue and movement input.
+The two new faults are gone: PC `0x021AB1AC` no longer occurs, and holding
+South for 600 frames at `mainloop` 32,244+ no longer faults at
+`0x021AB4A4`. `overlay_log_count` 51, `unimplemented_log_count=0`,
+`pack_result=0`.
+
+### Field stall — full white fade, input ignored (OPEN)
+
+The game is stable but does not become playable. Once the intro dialogue ends,
+the top screen is solid white, `unowa_g3_verts` stays 0 while `g3_frames`
+keeps rising, and `BLDY` (DS `0x04000054`, read from `NitroPort_IoReg` at
+`0x007217C0`) is `0x0010` with `BLDCNT_A` `0x1B44` — a full-intensity fade to
+white. It does not clear over 3,600 frames with no input; A, B, START, D-pad
+and touch do not open the menu or restore the 3D scene. No native errors are
+logged. `FLD_VREQ_ApplyBlendBrightness` (`ov021/fld_vreq.c:203`) is the route
+that sets BLDY from a queued field visual request; the game appears to be
+waiting on a script/fade step that never completes in the port. This is a
+stall, not a crash, and is the next thing to diagnose before walking,
+collision and map transitions can be exercised.
