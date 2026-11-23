@@ -1278,6 +1278,40 @@ Walking and camera movement outside scripted dialogue are still not
 demonstrated: every D-pad attempt so far occurred while a dialogue or menu
 owned input. Reaching Nuvema Town proper and moving the player remain open.
 
+#### Missing battle Pokémon sprites (investigating, 2026-11-23)
+
+The battle arena and HP bars render, but the two Pokémon themselves do not.
+Investigation on build `883327620f...` established:
+
+- The visible UI is 2D OBJ (OAM has 20 active mode-0 entries, OBJ VRAM and
+  palette contain data). The `s_stats.obj_quads` counter read 0, but that is
+  another counter compiled out by `HGSS_PROFILE_OFF` (UNOWA-4 issue 3), so it
+  is not evidence.
+- Aletheia's `arm9/mcss.c:963 MCSS_Draw` renders Pokémon as textured G3
+  billboards, not OBJ. It skips works whose `loaded` flag is not 1. In the
+  live battle `MCSS_Draw` (host `0x00502ca0`) was called, `McssSys.maxCount`
+  was 14 and works 1 and 2 both had `loaded = 1`, so they were not skipped.
+- `MCSS_Draw` builds its billboard camera from
+  `SCREENTEX_CameraPositionOut/TargetOut/UpOut` (DS `0x02148D8C/98/A4`).
+  All three were zero in the live battle. A breakpoint on
+  `SCREENTEX_SetupCamera` (`0x005049ac`) recorded zero hits in ten frames;
+  the only decompiled caller is `ENCEFF_UpdateModelScene` (ov076), which is
+  not on the battle path. `sinjoh/fx_mtx43.c:429 MTX_LookAt` normalises
+  `camPos - target` and crosses with `up`, so three zero vectors produce an
+  all-zero billboard matrix and the quads collapse.
+- Writing valid target `(0,0,-0x1000)` and up `(0,0x1000,0)` into the flat
+  Out vectors raised `g3_verts` 466 → 516 during the send-out animation,
+  confirming those vectors reach geometry submission, but the Pokémon were
+  still not visible at the settled command menu. The vectors are therefore a
+  contributing factor, not the whole cause. The native `NNS_G3dGlb` camera
+  fields at `0x01259bc8+0x240/0x24C/0x258` hold `(0,0,0)`,
+  `(0,0x1000,0)`, `(0,0,-0x1000)` and are a principled source for a fix.
+
+LOTUS save states were created for fast iteration on build `883327620f...`:
+`unowa-bedroom-8833`, `unowa-before-battle-8833`, `unowa-battle-8833`,
+`unowa-battle-command-8833`. The host restart invalidated them; recreate the
+same checkpoints on any new build before resuming this investigation.
+
 Continuing the same battle confirmed the move menu executes an attack
 (Sunkern's HP fell and Tepig's fell from 21 to 11), the battle-transition
 animation plays, and B/Start returns to the command menu. After Sunkern's HP
