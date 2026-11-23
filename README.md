@@ -1,4 +1,6 @@
-# unowa
+# THIS PROJECT IS CURRENTLY A RESEARCH EXPERIMENT! THIS IS NOT A PLAYABLE GAME! 
+
+## unowa
 
 Native Old 3DS port of Pokémon Black and White. See `UNOWA.md` for scope,
 milestones and engineering rules. This repository contains port code only; the

@@ -12,7 +12,8 @@ YOU DO NOT START INVENTING BULLSHIT SOLUTIONS, YOU DO NOT START DRIVING IT WITH 
 
 You're not expected to have deep technical knowledge of the 3DS platform or how to program efficiently for it. This information has been collected for you already. If it isn't already on disk, clone https://github.com/estyseesghosts/coffeepot.git. Always refer to coffeepot's CTR section when you're writing code or planning project changes - read the relevant hardware, firrmware or engineering articles, so you understand what you're working with. If you can't justify a change with real-hardware evidence or a citation from the wiki, you probably should not do it. Never edit coffeepot yourself. If you notice something genuinely incorrect, PR and tell the user. Always follow the wiki's C style guide.
 
-The coffeepot wiki is provided locally on this machine in workdir/coffeepot/.
+The coffeepot wiki is provided locally on this machine in workdir/nintendo-homebrew/coffeepot/.
+
 ## Delegating to subagents
 
 A lead agent must give every subagent it calls **explicit instructions, explicit deliverables and explicit avoidables**. This is not optional, and it matters most for implementer agents: they edit files and cannot rely on chat context the lead has not written down.
