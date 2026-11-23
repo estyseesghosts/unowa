@@ -1121,16 +1121,29 @@ South for 600 frames at `mainloop` 32,244+ no longer faults at
 `0x021AB4A4`. `overlay_log_count` 51, `unimplemented_log_count=0`,
 `pack_result=0`.
 
-### Field stall — full white fade, input ignored (OPEN)
+### Field stall — the field 3D scene draws no geometry (OPEN)
 
 The game is stable but does not become playable. Once the intro dialogue ends,
-the top screen is solid white, `unowa_g3_verts` stays 0 while `g3_frames`
-keeps rising, and `BLDY` (DS `0x04000054`, read from `NitroPort_IoReg` at
-`0x007217C0`) is `0x0010` with `BLDCNT_A` `0x1B44` — a full-intensity fade to
-white. It does not clear over 3,600 frames with no input; A, B, START, D-pad
-and touch do not open the menu or restore the 3D scene. No native errors are
-logged. `FLD_VREQ_ApplyBlendBrightness` (`ov021/fld_vreq.c:203`) is the route
-that sets BLDY from a queued field visual request; the game appears to be
-waiting on a script/fade step that never completes in the port. This is a
-stall, not a crash, and is the next thing to diagnose before walking,
-collision and map transitions can be exercised.
+the top screen is solid white, input is ignored (A/B/START/D-pad/touch do not
+open the menu or move the player), and no native errors are logged. It stays
+this way over 3,600 frames with no input and under continuous input.
+
+A first hypothesis, that this was a stuck white fade, was tested and rejected:
+`BLDCNT_A` is `0x1B44` (fade-to-white mode) and `BLDY` `0x0010` (full
+intensity) in `NitroPort_IoReg`, but writing zero to both in a disposable
+LOTUS session left the top screen white. `g_wipeSys` (DS `0x021467A4`, the
+game's wipe state) is all zeros — no wipe is active. The white is the 3D
+clear colour with nothing drawn on top.
+
+The real measurement is in the renderer counters (`engine/graphics/renderer.c:
+160-164`): `unowa_g3_frames` keeps rising (14,277 at the last sample) while
+`unowa_g3_verts` and `unowa_g3_batches` are both 0 and `g3_serial` advances.
+So the game keeps presenting a 3D frame with zero geometry. The title's 3D
+scene did render (`g3_verts` 5,412 at the start menu), and the field briefly
+showed 5,390 vertices at `mainloop` 20,645 in the earlier weather-fix-only
+build before the weather fault; after that point the field scene never
+submits geometry again. This is an M4 field-scene issue, not a fade or a
+pointer fault: the next step is to find why the field's 3D scene stops
+submitting batches (camera/scene setup, map resource load, or a script step
+that never advances) before walking, collision and map transitions can be
+exercised.
