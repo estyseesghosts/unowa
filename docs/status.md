@@ -1258,3 +1258,22 @@ comparison. Rebuilt 5,440,436 bytes, SHA-256
 fresh LOTUS session on that binary again reached `g3_verts` 973 /
 `g3_batches` 26 at `mainloop` 9,332 with culling enabled and the bedroom
 visible.
+
+#### Verified gameplay slice on `883327620f...` (2026-11-23)
+
+Continuing that same fresh session with the corrected button mapping and
+~130-frame waits between A presses reached, in order and with captures:
+
+1. Bedroom in 3D (973 verts/26 batches), Cheren's and Bianca's dialogue
+   advancing one line per press once the typewriter finished.
+2. Gift-box/starter selection: Tepig's 3D model (`g3_verts` 4,826), the
+   YES/NO confirmation, then back to the bedroom.
+3. A wild battle against Sunkern: both combat sprites, HP bars, the
+   "What will Tepig do?" command menu, the Tackle/Tail Whip move menu, and
+   the battle-transition animation after choosing a move. `g3_verts` 466 /
+   `g3_batches` 9 during the battle.
+4. No native faults or stops; `unimplemented_log_count` stayed 0.
+
+Walking and camera movement outside scripted dialogue are still not
+demonstrated: every D-pad attempt so far occurred while a dialogue or menu
+owned input. Reaching Nuvema Town proper and moving the player remain open.
