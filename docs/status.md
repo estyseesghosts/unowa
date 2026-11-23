@@ -1277,3 +1277,11 @@ Continuing that same fresh session with the corrected button mapping and
 Walking and camera movement outside scripted dialogue are still not
 demonstrated: every D-pad attempt so far occurred while a dialogue or menu
 owned input. Reaching Nuvema Town proper and moving the player remain open.
+
+Continuing the same battle confirmed the move menu executes an attack
+(Sunkern's HP fell and Tepig's fell from 21 to 11), the battle-transition
+animation plays, and B/Start returns to the command menu. After Sunkern's HP
+was exhausted, a post-battle window appeared as six empty black boxes with
+pink corners and no readable text; A/B did not dismiss it. This is a newly
+characterised 2D window-rendering limitation, not a 3D fault. No native
+faults were logged in any of these steps.
