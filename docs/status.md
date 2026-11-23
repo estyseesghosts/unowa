@@ -832,6 +832,69 @@ through frame 4900. Selecting NINTENDO WFC SETTINGS instead faults in
 `DWCi_TSKlInit` (`ov016/task.c:119`) on a NULL task at +0x78, which is the
 unported Nintendo WFC stack (see Wireless stubs), not the menu.
 
+### The field map: three DS assumptions the intro never reached
+
+The first field map (Nuvema Town, after the intro) is the first real 3D world,
+and it found three places where the port still handed the guest a DS address
+the ARM11 process does not map. All three are fixed; the evidence below is
+LOTUS, one stop at a time.
+
+**Overlay static initialisers ran out of the flat image.**
+`GAMESYSTEM_ProcInit` (`gamesystem.c:449`) loads ov230 (the anti-tamper
+loader), runs the sealed-body checks and unloads it again. `FS_StartOverlay`
+runs an overlay's static-initialiser table on every load
+(`fs_overlay.c:403`), and `__wrap_NitroPort_OverlayInfo` pointed the SDK at the
+table's DS address in the flat image. ov230's entries are its decryption
+routines (`0x02188408..0x02189908`, `LOADER_ENTRY_DecryptCallStubs*`), but ov230
+is blocklisted (`engine/game_overlay_blocklist.txt`) and its six sealed bodies
+are stubs (`engine/stubs/port_stubs.c:85-128`), so no native function exists.
+The flat image is a copy of DS main RAM, not executable memory: the first
+entry ran as data and the stop was a prefetch into `0x00B54058`
+(DS `0x02189058`), with `FS_LoadOverlay -> FS_StartOverlay` on the stack.
+
+`tools/gen_flat_image.py` now emits a native initialiser table per module
+(`unowa_flat_sinit`) and the overlay info hands the SDK that table, or a count
+of zero when an entry has no native definition. A table is refused whole, never
+partially, because the entries run in order. The generator states the decision:
+
+```
+ov230 static initialisers not run, no native code: 0x02188408 0x021889B0 0x02188CB0 0x02189448 0x02189908
+```
+
+**DS VRAM pointers reached the SDK's block clears.** The next stop was an
+unmapped write to `0x06800000`:
+`MIi_CpuClearFast(0, (void *)HW_LCDC_VRAM, 0xA4000)`
+(`bg_sys.c:3438`; `ov020/event_mapchange.c:776` is the same clear in the
+map-change event that starts the field). `HW_LCDC_VRAM` is a NitroSDK macro, so
+the generated `sdk_ioreg.h` cannot redirect it; the address reached libnitro's
+loop unchanged. `unowa_ds_to_host` now covers every DS region sinjoh shadows
+(the same table as `tools/gen_port_ioreg_header.py:23-32`: I/O, palette, BG/OBJ
+VRAM, LCDC VRAM, OAM), and `engine/runtime/ds_memory_ops.c` wraps
+`MIi_CpuClear/Copy{16,32,Fast}`, `MI_CpuFill8` and `MI_CpuCopy8` at the final
+link to translate their pointer arguments. The same fix covers clears already
+compiled into other overlays (`HW_BG_VRAM`/`HW_OBJ_VRAM` in ov071, ov109,
+ov174, ov203, ov205) before their code runs.
+
+**A local address macro hid the address from the literal rewrites.** The field
+then stopped on an unmapped read of `0x021DE7C4` inside
+`FIELD_PLACE_NAME_Create` -> `BG_SYS_InitBgLayer`, from
+`FIELDMAP_SeqCreateSubsystems` (`fieldmap.c:891`). The banner passes its BG
+template as
+`(const struct BgTemplate *)FIELD_PLACE_NAME_BG_TEMPLATE_ADDR`
+(`field_place_name.c:299`), and the address is a local
+`#define ... 0x021DE334` (`field_place_name.c:127`). The main-RAM literal
+rewrite (`tools/patch_sources.py rewrite_main_ram`) only sees numbers, so the
+TU was compiled unpatched and the raw DS pointer was dereferenced.
+`rewrite_address_macros` now applies the same rule to a local
+`#define NAME 0xADDR` used directly behind a pointer cast (a use as a value
+keeps its value). Nine TUs, `ov021/field_place_name.c` among them, are patched
+by that rule.
+
+After those three, the field map runs: LOTUS shows Nuvema Town in 3D
+("GAME FREAK PRESENTS") at frame 13,480, `unowa_mainloop_count` 13,021,
+`unowa_g3_frames` 5,549, and the overlay log below. The next stop is later in
+the field (see Open blockers).
+
 
 
 
@@ -901,3 +964,77 @@ A future port of these features needs, at minimum:
   file bytes are the player's Black/White NitroFS files; only the header's
   validation tag is borrowed. Replacing it needs a build-tree `pak.c` override
   or an upstream entry for the Black/White hashes.
+
+### Field stop 4 — cross-overlay function pointers in `ev=ptr` data (FIXED)
+
+Reproduced from a fresh secondary session (`card: unowa`, asset `unowa-m1`,
+build at the time `m1-test.3dsx` 5,305,564 bytes). After tapping through NEW
+GAME, name entry and Juniper/Cheren/Bianca's intro with LOTUS input
+(A=0x001, touch OK at 3DS `(290,204)`), the game reaches Nuvema Town and then
+halts:
+
+- `mainloop_count` freezes at 18,716, `pacing_vblanks` 18,717,
+  `present_count` 9,358, `overlay_log_count` jumps 42→44, screen white.
+- Core 0 stop: `exception 12`, `unmapped Read32 @ 0x0216E464 at PC 0x0216E464`.
+- `addr2line` of the stack: `FIELDMAP_SetupMmdlSys`
+  (`ov021/fieldmap.c:1645`) → `FIELDMAP_SeqCreateSubsystems` (`:927`) →
+  `FLDMMDL_CheckMoveBit` (`ov010/fldmmdl.c:911`).
+- `function_addrs.tsv`: `0x0216E464 = FLDMMDL_MoveInitProcDummy` (ov010).
+  The game jumped to the raw DS address of a static dummy proc and fetched
+  unmapped memory.
+
+Root cause is in `tools/gen_flat_image.py`. `gWeatherTable`-style proc tables
+in ov021 data (`g_021D58A8`, `g_021D5A24`) are Aletheia `numeric`/`u32`
+objects with `ev=ptr` and no `targets`. `typed_words()` labelled their words
+`"maybe"`, so `build()` used the conservative same-module/ARM9 lookup. The
+pointers target functions in **ov010**, so they were left as raw DS values.
+The four neighbouring proc-list words in `struct` objects with `targets`
+(`0x021D56E8` etc.) already relocated, which is why only the init/move pair
+crashed.
+
+Measured before changing the rule: 1995 objects carry `ev=ptr`; of their
+currently-`"maybe"` words, exactly **8** match a function under
+`resolve_function()` — the 2×4 proc-list entries in `g_021D58A8`/`g_021D5A24`,
+all resolving to `FLDMMDL_Move{Init,Proc,Delete,Recover}ProcDummy`. Zero false
+positives. Fix: `typed_words()` now marks an object whose `ev` list contains
+`ptr` as a `"holder"`, so `build()` uses `resolve_function()` for it. This is
+the object map's own type evidence, not a value scan.
+
+Rebuilt with `make -f engine/game.mk link-final -j8`:
+`function pointers` 7,208 → 7,216; the flat image now has all eight
+relocations, and the ELF defines all four dummy procs (`0x001a323c..48`)
+instead of only two. New `m1-test.3dsx`: 5,305,668 bytes, SHA-256
+`41695026bb1a143be1960e9b3ff27f125595a90ef920bb88ba5547de140185a9`.
+
+LOTUS verification (fresh secondary session): the same input sequence reaches
+Nuvema Town at `mainloop` 20,045 and keeps advancing to 20,866 — **2,150 ticks
+past the old 18,716 stop** — with `overlay_log_count` 47→51, `pack_result=0`
+and `unimplemented_log_count=0`. The first field stop is closed.
+
+### Field stop 5 — cross-overlay data pointer in `gWeatherTable` (OPEN)
+
+In the same new build the game halts later, at `mainloop` 20,866:
+
+- Core 0 stop: `exception 12`, `unmapped Read32 @ 0x021EE8F8`. A run of
+  native_log reads precedes it: `0x021EE8C2` (u16), `0x021EE8E8`, `0x021EE8EC`,
+  `0x021EE8F4`, `0x021EE8F8` (u32).
+- PCs symbolize to `WEATHER_TASK_Update` (`ov021/weather_task.c:265,279,285,308`)
+  and `WEATHER_TASK_AllocParticles` (`:994,998`), reading `task->kind->...`.
+- `WEATHER_TASK_Start` stores a `WeatherKindDef *` passed from
+  `gWeatherTable[weatherId].taskParam` (`ov021/weather.c:198,288,306`).
+  `gWeatherTable` is at `0x021D8868`; its raw first word is `0x021EE8C0`, an
+  address inside **ov024**'s data window (`data_start 0x021EE8A0`), and the
+  flat generator emits **no relocation** for `0x021D8868`. The game therefore
+  dereferences the raw DS address, which ARM11 does not map.
+- `gWeatherTable` is 8-byte-strided (`taskParam`, `overlayId`); nine `taskParam`
+  words (`0x021D8868..0x021D88D8`) point into ov024–ov028 data windows. Their
+  Aletheia objects are `numeric`/`u32`, `ev=pool` — weaker evidence than the
+  `ev=ptr` tables fixed above, so the `ev` rule does not apply.
+
+A blanket "rebase aligned `maybe` words into any other module's data window"
+rule would touch 35 words; sampling shows some are plausibly numeric constants
+(e.g. `0x20A0000`, `0x20A0004`), so it is **not** shipped. This needs a
+type-accurate way to identify `WeatherEntry.taskParam` as a pointer (source
+declaration, a named `WeatherKindDef` symbol, or Aletheia typed companions)
+before the generator can rebase it safely. Left open deliberately rather than
+shipping a value heuristic that could corrupt data.

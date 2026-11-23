@@ -31,8 +31,53 @@ extern void NitroPort_Log(const char *format, ...);
 #define DS_MAIN_RAM_START 0x02000000u
 #define DS_MAIN_RAM_END 0x03000000u
 #define DS_FLAT_MASK 0x007FFFFFu
-#define DS_LCDC_VRAM_START 0x06800000u
-#define DS_LCDC_VRAM_SIZE 0x000A4000u
+
+/*
+ * The DS memory ranges sinjoh keeps in shadow arrays. Taken from
+ * tools/gen_port_ioreg_header.py REGIONS, which redirects the game's
+ * `IOREG_ADDR(...)` names to the same storage; a pointer the game forms from a
+ * NitroSDK macro instead (`HW_LCDC_VRAM`, `HW_BG_VRAM`) reaches the port as a
+ * raw DS address and lands here through unowa_ds_to_host (see
+ * engine/runtime/ds_memory_ops.c).
+ */
+extern unsigned char NitroPort_IoReg[];
+extern unsigned char NitroPort_Pltt[];
+extern unsigned char NitroPort_BgVram[];
+extern unsigned char NitroPort_DbBgVram[];
+extern unsigned char NitroPort_ObjVram[];
+extern unsigned char NitroPort_DbObjVram[];
+extern unsigned char NitroPort_LcdcVram[];
+extern unsigned char NitroPort_Oam[];
+
+static const struct {
+    uint32_t base;
+    uint32_t size;
+    unsigned char *array;
+} s_ds_regions[] = {
+    { 0x04000000u, 0x00110000u, NitroPort_IoReg },
+    { 0x05000000u, 0x00000800u, NitroPort_Pltt },
+    { 0x06000000u, 0x00080000u, NitroPort_BgVram },
+    { 0x06200000u, 0x00020000u, NitroPort_DbBgVram },
+    { 0x06400000u, 0x00040000u, NitroPort_ObjVram },
+    { 0x06600000u, 0x00020000u, NitroPort_DbObjVram },
+    { 0x06800000u, 0x000A4000u, NitroPort_LcdcVram },
+    { 0x07000000u, 0x00000800u, NitroPort_Oam },
+};
+
+void *unowa_ds_to_host(uint32_t ds_address)
+{
+    uint32_t i;
+
+    if (ds_address >= DS_MAIN_RAM_START && ds_address < DS_MAIN_RAM_END) {
+        return NitroPort_MainMem + (ds_address & DS_FLAT_MASK);
+    }
+    for (i = 0; i < sizeof(s_ds_regions) / sizeof(s_ds_regions[0]); ++i) {
+        if (ds_address - s_ds_regions[i].base < s_ds_regions[i].size) {
+            return s_ds_regions[i].array + (ds_address - s_ds_regions[i].base);
+        }
+    }
+    return NULL;
+}
 
 /*
  * Aletheia src/game/arm9/os_arena.c:30 lists the DS main arena's low end,
@@ -40,17 +85,6 @@ extern void NitroPort_Log(const char *format, ...);
  * script binds the name to its flat-image byte.
  */
 extern char SDK_MAIN_ARENA_LO[];
-
-void *unowa_ds_to_host(uint32_t ds_address)
-{
-    if (ds_address >= DS_MAIN_RAM_START && ds_address < DS_MAIN_RAM_END) {
-        return NitroPort_MainMem + (ds_address & DS_FLAT_MASK);
-    }
-    if (ds_address - DS_LCDC_VRAM_START < DS_LCDC_VRAM_SIZE) {
-        return NitroPort_LcdcVram + (ds_address - DS_LCDC_VRAM_START);
-    }
-    return NULL;
-}
 
 /* Rewrite one stored DS data pointer to its flat-image address. */
 static void relocate_flat_word(uint32_t ds_address)
@@ -129,9 +163,13 @@ BOOL __wrap_NitroPort_OverlayInfo(FSOverlayInfo *p_ovi, MIProcessor target, FSOv
     p_ovi->header.ram_address = unowa_ds_to_host(module->ram_start);
     p_ovi->header.ram_size = module->ram_end - module->ram_start;
     p_ovi->header.bss_size = module->bss_end - module->ram_end;
-    if (module->sinit_end > module->sinit_start) {
-        p_ovi->header.sinit_init = unowa_ds_to_host(module->sinit_start);
-        p_ovi->header.sinit_init_end = unowa_ds_to_host(module->sinit_end);
+    if (module->sinit_count) {
+        /* Native initialisers only (flat_memory.h). Pointing the SDK at the
+         * DS table in the flat image would call ROM bytes: FS_StartOverlay
+         * runs sinit_init..sinit_init_end, and the flat image is data. */
+        p_ovi->header.sinit_init = &unowa_flat_sinit[module->sinit_first];
+        p_ovi->header.sinit_init_end = &unowa_flat_sinit[module->sinit_first
+                                                        + module->sinit_count];
     }
     p_ovi->header.file_id = (u32)id;
     /* The image is already decompressed: no FS_OVERLAY_FLAG_COMP, so

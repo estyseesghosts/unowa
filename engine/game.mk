@@ -68,6 +68,7 @@ ENGINE_SRCS := engine/graphics/renderer.c engine/diagnostics/log.c \
                engine/graphics/pica/gpu.c \
                engine/graphics/pica/targets.c engine/graphics/resources/atlas.c \
                engine/runtime/unowa_frame.c \
+               engine/runtime/ds_memory_ops.c \
                engine/storage/paths.c engine/runtime/unowa_edition.c \
                engine/runtime/frame_pacing.c
 ENGINE_OBJS := $(patsubst %.c,$(OUT)/obj/%.o,$(ENGINE_SRCS))
@@ -262,6 +263,14 @@ $(OUT)/obj/engine/runtime/unowa_edition.o: ENGINE_CFLAGS += -DUNOWA_EDITION=0
 FLAT_WRAPS := -Wl,--wrap=NitroPort_OverlayInfo -Wl,--wrap=NitroPort_OverlayLoadImage \
               -Wl,--wrap=NitroPort_OverlayClearBss -Wl,--wrap=OS_InitArena
 
+# --wrap: engine/runtime/ds_memory_ops.c translates DS pointers (HW_LCDC_VRAM
+# and friends, raw 0x02xxxxxx) passed to the SDK's block clear/copy helpers;
+# see its header comment.
+DS_MEMORY_WRAPS := -Wl,--wrap=MIi_CpuClearFast -Wl,--wrap=MIi_CpuClear32 \
+                   -Wl,--wrap=MIi_CpuClear16 -Wl,--wrap=MIi_CpuCopyFast \
+                   -Wl,--wrap=MIi_CpuCopy32 -Wl,--wrap=MIi_CpuCopy16 \
+                   -Wl,--wrap=MI_CpuFill8 -Wl,--wrap=MI_CpuCopy8
+
 $(OUT)/m1-test.elf: $(OUT)/obj/engine/app/game_main.o $(REN_DIR)/renamed.stamp \
                     $(FLAT_OBJS) $(FLAT_LD) $(ENGINE_OBJS) $(OUT)/gen/card_backup_port.o \
                     $(WIRELESS_OBJ)
@@ -270,7 +279,7 @@ $(OUT)/m1-test.elf: $(OUT)/obj/engine/app/game_main.o $(REN_DIR)/renamed.stamp \
 	    -fno-short-enums -D__3DS__ -specs=3dsx.specs \
 	    -L$(DEVKITPRO)/libctru/lib -Wl,--gc-sections \
 	    -Wl,--no-enum-size-warning -Wl,--wrap=NitroPort_Unimplemented \
-	    -Wl,--wrap=OS_Terminate $(FLAT_WRAPS) \
+	    -Wl,--wrap=OS_Terminate $(FLAT_WRAPS) $(DS_MEMORY_WRAPS) \
 	    -Wl,--start-group $< $(OUT)/gen/card_backup_port.o $(GAME_REN) $(GV_LIB) \
 	    $(NITRO)/build/3ds/libnitro.a \
 	    $(NNS)/build/3ds/libnitrosystem.a \

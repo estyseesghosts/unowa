@@ -38,8 +38,8 @@ typedef struct {
     uint32_t ram_start;
     uint32_t ram_end;
     uint32_t bss_end;
-    uint32_t sinit_start;
-    uint32_t sinit_end;
+    uint32_t sinit_first;
+    uint32_t sinit_count;
     uint32_t span_first;
     uint32_t span_count;
     uint32_t pointer_first;
@@ -52,6 +52,13 @@ extern const unsigned char unowa_flat_blob[];
 extern const unowa_flat_span unowa_flat_spans[];
 extern const uint32_t unowa_flat_pointer_words[];
 extern const unowa_flat_native unowa_flat_native_words[];
+/*
+ * Native static initialisers, in DS table order. FS_StartOverlay calls each
+ * on every load. The generated table holds only functions the build compiles;
+ * a module whose initialisers have no native definition gets a count of zero,
+ * because the flat image (ROM bytes) is not executable memory.
+ */
+extern void (*unowa_flat_sinit[])(void);
 extern const unowa_flat_module unowa_flat_modules[];
 extern const uint32_t unowa_flat_module_count;
 

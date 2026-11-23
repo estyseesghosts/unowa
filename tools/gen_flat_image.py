@@ -298,14 +298,18 @@ def typed_words(objects, narrow):
     """Yield (word address, how) for words the object map types as pointers.
 
     `how` is "ptr" for a typed pointer slot, "holder" for another word of an
-    object the map shows holds pointers (a `struct` or an object with a
-    `targets` list), and "maybe" for a word in an untyped object. A holder
-    word accepts an overlay function the way a typed slot does: the map lists
-    only ARM9 targets for the save block table at 0x0209DA30, and entry 51
-    there holds the ov010 pair FLDMMDL_GetMovedPosSaveSize/InitMovedPosSave
-    in fields it types `u32`. An untyped (`raw`/`zero`) object whose start is
-    in `narrow` (narrow_arrays) is skipped; a typed object keeps the map's
-    typing.
+    object the map shows holds pointers (a `struct`, an object with a
+    `targets` list, or one whose `ev` evidence names `ptr`), and "maybe" for
+    a word in an untyped object. A holder word accepts an overlay function
+    the way a typed slot does: the map lists only ARM9 targets for the save
+    block table at 0x0209DA30, and entry 51 there holds the ov010 pair
+    FLDMMDL_GetMovedPosSaveSize/InitMovedPosSave in fields it types `u32`.
+    The `ev` check matters for proc tables like g_021D58A8: Aletheia types it
+    `numeric`/`u32` with `ev=ptr` and no `targets`, so without it the word is
+    a conservative "maybe" whose same-module/ARM9 rule misses the ov010
+    functions it points at, and the game jumps to the raw DS address. An
+    untyped (`raw`/`zero`) object whose start is in `narrow` (narrow_arrays)
+    is skipped; a typed object keeps the map's typing.
     """
     for obj in objects:
         start = int(obj["addr"], 16)
@@ -319,7 +323,9 @@ def typed_words(objects, narrow):
             for offset in range((-start) % 4, size - 3, 4):
                 yield start + offset, "ptr"
             continue
-        other = "holder" if kind == "struct" or obj.get("targets") else "maybe"
+        ev = obj.get("ev") or ""
+        other = ("holder" if kind == "struct" or obj.get("targets")
+                 or "ptr" in ev.split(",") else "maybe")
         if kind == "struct":
             offset = 0
             for field, count in obj["fields"]:
@@ -366,6 +372,7 @@ class Image:
         self.spans = []          # (module index, ds address, blob offset, size)
         self.flat = []           # (module index, ds address)
         self.native = []         # (module index, ds address, symbol, addend)
+        self.sinit = []          # (module index, symbol) run at overlay load
         self.stats = {}
 
     def count(self, key, amount=1):
@@ -467,6 +474,20 @@ def build(modules, data_map, rows, functions, statics, native_spans, narrow):
         all_function_starts[key] = sorted(set(all_function_starts[key])
                                           | {value & ~1 for value in table})
 
+    def sinit_symbol(value, module, functions):
+        """Native name for one static-initialiser entry, or None.
+
+        Aletheia files the decrypted copy of an overlay's listing under a
+        `ovNNNd` region (function_addrs.tsv, ov230's loader is one), so the
+        suffix is accepted alongside the module's own table.
+        """
+        key = module["key"]
+        if key in functions and value in functions[key]:
+            return functions[key][value]
+        if key + "d" in functions and value in functions[key + "d"]:
+            return functions[key + "d"][value]
+        return None
+
     for index, module in enumerate(modules):
         image_bytes = module["image"]
         if image_bytes is None:
@@ -543,6 +564,37 @@ def build(modules, data_map, rows, functions, statics, native_spans, narrow):
                 continue
             image.flat.append((index, address))
             image.count("flat data pointers")
+
+        # Static initialisers are code the SDK calls on every load
+        # (FS_StartOverlay's sinit loop, fs_overlay.c:403, calls through
+        # sinit_init..sinit_init_end). The flat image is a copy of DS main
+        # RAM, not executable memory, so an entry is usable only when it
+        # resolves to a native function. A table with any unresolved entry is
+        # refused whole: the entries run in order and may depend on each
+        # other, so a partial run is not the DS's initial state.
+        if module["sinit_end"] > module["sinit_start"]:
+            resolved = []
+            missing = []
+            for address in range(module["sinit_start"], module["sinit_end"], 4):
+                if not module["ram_start"] <= address <= tail_end - 4:
+                    continue
+                value = word_at(address)
+                if value == 0:
+                    continue
+                symbol = sinit_symbol(value, module, functions)
+                if symbol is None:
+                    missing.append(value)
+                else:
+                    resolved.append(symbol)
+            if missing:
+                image.count("modules whose static initialisers are not run")
+                print("  %s static initialisers not run, no native code: %s"
+                      % (module["key"],
+                         " ".join("0x%08X" % value for value in missing)))
+            else:
+                for symbol in resolved:
+                    image.sinit.append((index, symbol))
+                image.count("static initialisers", len(resolved))
     return image
 
 
@@ -652,6 +704,7 @@ def write_tables(path, blob_path, modules, image):
         by_module.setdefault(entry[0], {"spans": [], "flat": [], "native": []})["native"].append(entry)
 
     symbols = sorted({entry[2] for entry in image.native})
+    sinit_symbols = sorted({entry[1] for entry in image.sinit})
     lines = [
         "/* Generated by tools/gen_flat_image.py from the player's ROM extract.",
         " * Never edit, never commit. See engine/runtime/flat_memory.h. */",
@@ -666,18 +719,26 @@ def write_tables(path, blob_path, modules, image):
         "",
     ]
     for symbol in symbols:
+        if symbol in sinit_symbols:
+            continue
         lines.append("extern char %s[];" % symbol)
+    for symbol in sinit_symbols:
+        lines.append("extern void %s(void);" % symbol)
     lines.append("")
 
-    spans, flats, natives, descriptors = [], [], [], []
+    spans, flats, natives, sinits, descriptors = [], [], [], [], []
     for index, module in enumerate(modules):
         entry = by_module.get(index, {"spans": [], "flat": [], "native": []})
         first_span, first_flat, first_native = len(spans), len(flats), len(natives)
+        first_sinit = len(sinits)
+        module_sinits = [symbol for owner, symbol in image.sinit if owner == index]
         spans.extend(entry["spans"])
         flats.extend(sorted(entry["flat"]))
         natives.extend(sorted(entry["native"], key=lambda item: item[1]))
+        sinits.extend(module_sinits)
         descriptors.append((module, first_span, len(entry["spans"]), first_flat,
-                            len(entry["flat"]), first_native, len(entry["native"])))
+                            len(entry["flat"]), first_native, len(entry["native"]),
+                            first_sinit, len(module_sinits)))
 
     lines.append("const unowa_flat_span unowa_flat_spans[] = {")
     for _index, address, offset, size in spans:
@@ -692,12 +753,24 @@ def write_tables(path, blob_path, modules, image):
         target = symbol if addend == 0 else "%s + %d" % (symbol, addend)
         lines.append("    { 0x%08Xu, %s }," % (address, target))
     lines.append("};")
+    # FS_StartOverlay calls these in order on every load. An empty table is
+    # written as one null entry so the array has a definition; the module's
+    # count is zero, so the SDK never reads it.
+    lines.append("void (*unowa_flat_sinit[])(void) = {")
+    if sinits:
+        for symbol in sinits:
+            lines.append("    %s," % symbol)
+    else:
+        lines.append("    0,")
+    lines.append("};")
     lines.append("const unowa_flat_module unowa_flat_modules[] = {")
-    for module, span0, nspan, flat0, nflat, native0, nnative in descriptors:
-        lines.append("    { 0x%08Xu, 0x%08Xu, 0x%08Xu, 0x%08Xu, 0x%08Xu,"
+    for (module, span0, nspan, flat0, nflat, native0, nnative,
+         sinit0, nsinit) in descriptors:
+        lines.append("    { 0x%08Xu, 0x%08Xu, 0x%08Xu, %d, %d,"
                      " %d, %d, %d, %d, %d, %d }, /* %s */"
                      % (module["ram_start"], module["ram_end"], module["bss_end"],
-                        module["sinit_start"], module["sinit_end"], span0, nspan, flat0, nflat, native0, nnative, module["key"]))
+                        sinit0, nsinit, span0, nspan, flat0, nflat, native0, nnative,
+                        module["key"]))
     lines.append("};")
     lines.append("const uint32_t unowa_flat_module_count = %d;" % len(descriptors))
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")

@@ -361,8 +361,63 @@ def rewrite_main_ram(text, relative, index):
     return text, count
 
 
-SWAP_BUFFERS_WRITE = re.compile(r"\breg_G3_SWAP_BUFFERS\s*=\s*([^;]+);")
+ADDRESS_MACRO = re.compile(
+    r"^[ \t]*#[ \t]*define[ \t]+([A-Za-z_]\w*)[ \t]+0x0?([0-9A-Fa-f]{7})[uUlL]*[ \t]*$",
+    re.M)
 
+
+def rewrite_address_macros(text):
+    """Redirect a local `#define NAME 0xADDR` used directly behind a cast.
+
+    The literal rewrites (rewrite_main_ram, rewrite_port_regions) see a number
+    in the source. A file that names the same address once, in a local macro,
+    hides it from them. ov021's place-name banner did that:
+    `#define FIELD_PLACE_NAME_BG_TEMPLATE_ADDR 0x021DE334`
+    (field_place_name.c:127) used as
+    `(const struct BgTemplate *)FIELD_PLACE_NAME_BG_TEMPLATE_ADDR`
+    (field_place_name.c:299). The unpatched TU handed the raw DS pointer to
+    BG_SYS_InitBgLayer, which read the template: the stop was an unmapped read
+    of 0x021DE7C4 while FIELD_PLACE_NAME_Create built the banner at the first
+    field map. Only a use directly behind a pointer cast is an address, the
+    same rule the literal rewrites apply; a macro used as a value keeps it.
+    """
+    macros = {}
+    for match in ADDRESS_MACRO.finditer(text):
+        value = int(match.group(2), 16)
+        if 0x02000000 <= value < 0x03000000:
+            macros.setdefault(match.group(1), flat_address(value))
+            continue
+        for base, array, size in REGIONS:
+            if base <= value < base + size:
+                macros.setdefault(match.group(1),
+                                  "((uptr)%s + 0x%X)" % (array, value - base))
+                break
+    if not macros:
+        return text, 0
+    token = re.compile(r"\b(?:%s)\b" % "|".join(
+        re.escape(name) for name in sorted(macros, key=len, reverse=True)))
+    pieces = []
+    count = 0
+    last = 0
+    for start, end in code_spans(text):
+        pieces.append(text[last:start])
+        code = text[start:end]
+
+        def replace(match, code=code):
+            nonlocal count
+            before = code[max(0, match.start() - 80):match.start()]
+            if not POINTER_CAST_BEFORE.search(before):
+                return match.group(0)
+            count += 1
+            return macros[match.group(0)]
+
+        pieces.append(token.sub(replace, code))
+        last = end
+    pieces.append(text[last:])
+    return "".join(pieces), count
+
+
+SWAP_BUFFERS_WRITE = re.compile(r"\breg_G3_SWAP_BUFFERS\s*=\s*([^;]+);")
 
 def rewrite_swap_buffers(text):
     """Route direct DS geometry-swap writes through the port seam.
@@ -597,9 +652,11 @@ def patch_text(text, relative, removed=(), fixups=(), index=None):
         count += main_ram
         text, regions = rewrite_port_regions(text)
         count += regions
+        text, macros = rewrite_address_macros(text)
+        count += macros
         text, swap = rewrite_swap_buffers(text)
         count += swap
-        if (main_ram or regions) and not shared:
+        if (main_ram or regions or macros) and not shared:
             text = SHARED_DECL + text
     return text, count
 
