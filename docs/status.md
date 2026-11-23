@@ -1147,3 +1147,97 @@ pointer fault: the next step is to find why the field's 3D scene stops
 submitting batches (camera/scene setup, map resource load, or a script step
 that never advances) before walking, collision and map transitions can be
 exercised.
+
+#### Field stall: box-test state, measured (2026-11-22)
+
+All numbers below come from one fresh secondary LOTUS session
+(`card: unowa`, asset `unowa-m1`) driven through the intro with A taps. The
+`execute` entry breakpoint (opcode in `r4`, parameter pointer in `r1`) pinned
+the single per-frame `G3OP_BOX_TEST` (`op=0x70`). At that breakpoint:
+
+- The six box halfwords were `x=-32768, y=-2304, z=-32001,
+  w=24576, h=11520, d=17920` (`p=0x0125eae8`, words
+  `f7008000 600082ff 46002d00`).
+- `s_pos` (ELF `0x0125d364`) was `diag(0,0,0,0x1000)` in the unsanitised
+  build: rows 0-2 entirely zero, only `m[3][3]=0x1000`. `s_clip` therefore
+  collapsed to a single row of `s_proj`, so every corner failed the same
+  plane and the only box was culled (`box_tests=1`, `box_culled=1`,
+  `box_culled_far=0`).
+- `s_proj` was a valid perspective matrix; IOREG `0x640` held a stale but
+  valid clip matrix from before `s_pos` collapsed.
+
+Aletheia provides the exact producer. `ov010/field_g3d_map.c:783-809`
+(`FIELD_G3D_MAP_TestModelBox` / `FIELD_G3D_MAP_RunBoxTest`) emits
+`PUSH(0x11) -> SCALE(0x1b, info->boxPosScale) -> ... -> BOX_TEST(0x70) ->
+POP(0x12,1)`. `arm9/g3d_system.c:1264-1305` is the same sequence.
+
+kohjoh's `src/runtime/kj_g3.c` and sinjoh's `engine/runtime/kj_g3.c` are
+byte-identical apart from `s_wide = true`, so the matrix code is shared and
+not a sinjoh regression. Coffeepot's HGSS case study
+(`ctr/engineering/case-studies/case-study-hgss-port.md:17-25`) warns that a
+fast path must prove admission, work and output separately. An earlier note
+in this section claimed the DL state cache was ruled out because
+`s_dl_hits/misses/uncacheable` read 0/0/0; that evidence is **invalid** —
+UNOWA-4 issue 3 points out those counters are compiled out by
+`HGSS_PROFILE_OFF`. The DL cache has not been independently ruled out, but
+the root cause below was found and fixed without changing it.
+
+UNOWA now compiles a local `engine/runtime/kj_g3.c` (game.mk points at it,
+sinjoh stays pristine). Instrumentation tags every writer of `s_pos` into
+`unowa_pos_wtag` and counts degenerate results into `unowa_pos_zero_count`.
+A fresh 5,439,784-byte build (SHA-256
+`688773bd5293d66efeb2c06b64a3a3aa2bdc9016248cfaaf61e5befd729e5c646`)
+reproduced the fault: during the intro the tag was `2` (`load_matrix`) and
+`unowa_pos_zero_count` rose past 1,000. A conditional breakpoint on
+`op=0x17` captured a `MTX_LOAD_4x3` whose 12 parameter words were zero at
+`p=0x0125eb90`, immediately before the counter incremented. Writing an
+identity matrix into `gG3dBaseMtx43` (DS `0x02148B98`, host `0x00b33b98`)
+did not stop the zero loads, so that global is not the sole source. The
+degenerate load was not reproduced after the intro: in the field
+`unowa_pos_zero_count` was stable at 3,824 and `s_pos` at the box test was a
+valid scale-2 matrix with translation `(0x100000,0,0x100000)`.
+
+The guard that restores identity when a position matrix loses its rotation
+rows stopped the degenerate loads but did not restore the picture: in that
+field run `unowa_g3_verts` and `unowa_g3_batches` were still 0 and the top
+screen was still white. A runtime `unowa_no_cull` toggle then raised
+`g3_verts` 0 → 145 and `g3_batches` 0 → 10 with culling off, proving culling
+was the immediate blocker while the surviving single object was still off
+screen.
+
+The actual root cause is a symbol-binding mismatch. `gG3dBaseMtx43` (DS
+`0x02148B98`, host `0x00b33b98`) is not a separate matrix: it is the
+`cameraMtx` field of the game's `NNS_G3dGlb` (base `0x02148B4C` + `0x4C`,
+see `aletheia/src/game/arm9/nns_g3d_glb_types.h`). Aletheia's
+`NNS_G3dGlbInit` (`matched/arm9/func_0206A700.c`) calls
+`MTX_Identity43_(data_02148B98)`, and `MTX_LookAt` writes the view matrix
+there. In unowa, the game's `NNS_G3dGlb` resolves to sinjoh's **native** BSS
+(`0x01259bc8`), which is correctly initialised and updated, while the flat
+image copy at `0x00b33b4c` is all zeros. `ov010/field_g3d_map.c:578,624`
+loads the flat zero matrix with `MTX_LOAD_4x3`, so the position matrix lost
+its view transform and `G3BOX` culled the whole field.
+
+Verified fix in a disposable LOTUS session: copying the native
+`NNS_G3dGlb.cameraMtx` (48 bytes at `0x01259c14`) into the flat alias
+(`0x00b33b98`), with `unowa_no_cull` back to 0, raised `g3_verts` 145 → 973
+and `g3_batches` to 26. The top screen then showed the player's bedroom in
+Nuvema Town — bed, desk, bookshelf, plant, windows — rendered in 3D. The
+permanent fix binds `gG3dBaseMtx43` to `NNS_G3dGlb + 0x4C` in the generated
+`flat_names.ld` via `NATIVE_ALIASES` in `tools/gen_flat_image.py`. Rebuilt
+5,439,840 bytes, SHA-256
+`9a12a94598df53218e165a0ab37abd81190d41e20ab696de0921049e5dc849cf`;
+`nm` confirms `gG3dBaseMtx43 = 0x01259c14 = NNS_G3dGlb + 0x4C`. A fresh
+secondary LOTUS session with no runtime patches and `unowa_no_cull = 0`
+reached `mainloop` 5,832 with `g3_verts` 971 / `g3_batches` 26, and stayed at
+973 / 26 through `mainloop` 17,294. The captured top screen shows the
+player's bedroom with bed, desk, bookshelf, windows and plant. Correcting
+the LOTUS button-bit mapping (`0x20` = DS Down, `0x10` = Up, `0x40` = Left,
+`0x80` = Right, `0x400` = Start) produced Cheren's dialogue box
+("Would you get a move on and open the gift box already?"), so the field is
+now interactive. Walking/camera movement and the transition out of the
+bedroom to Nuvema Town remain unverified.
+
+Per UNOWA-4 issues 2 and 4, `unowa_pos_check()` and `unowa_no_cull` are
+instrumentation in a build-tree copy of sinjoh's engine; the guard's
+behavioural effect is to be removed once this fix is accepted, and the
+default build keeps culling enabled.
