@@ -11,8 +11,8 @@ verified on Old 3DS. Do not collapse them.
 | M1 — Game compilation | implemented; compiled; linked; tested headlessly | `link-final` builds `m1-test.3dsx`; see below | boots, then faults on DS I/O in M2 territory |
 | M2 — Native boot | complete in practice; tested in emulator | game's own `NitroMain` runs one tick per DS V-blank; 15–51 overlays load; the intro, title, new-game flow and first field map all execute original code. See the fault-chain table below. | Hardware verification and host32/3DS checkpoints absent; no exit-criterion blocker remains |
 | M3 — 2D | substantially complete; rendering in LOTUS | DS 2D engine on the PICA: logos, copyright, full intro movie, title, start menu, name entry and field text/banners captured. Direct-colour affine BGs, OBJ, windows, blending and brightness work. | 256-colour bitmap BGs, WideArt side bands, intro vertical striping unvalidated; no full oracle corpus |
-| M4 — 3D | in progress; major slice working in LOTUS | title 3D scene and lower-screen VRAM-display mode render; Nuvema Town field renders in 3D. New build reaches `mainloop` 20,866 with `g3_frames` 8,175, `g3_verts` 5,390 at field entry, overlay log 47→51. | `DISPCAPCNT` is approximated by live layers; flat BG VRAM view ignores bank remapping; title phase-2 shading not oracle-verified; battle/field coverage minimal |
-| M5 — Gameplay | early in progress | title → start menu → NEW GAME → gender/name entry → Juniper/Cheren/Bianca intro → first field map, all driven by LOTUS D-pad/touch. Save device and ARM7 sound clock work. | Walking/collision/camera, save/continue, battles, most menus/scripts, real audio output. Next field stop (`gWeatherTable` cross-overlay pointer) recorded below and OPEN |
+| M4 — 3D | in progress; major slice working in LOTUS | title 3D scene and lower-screen VRAM-display mode render; Nuvema Town field renders in 3D. New build reaches `mainloop` 25,759 with `g3_frames` 10,621, `g3_verts` 5,390 at field entry, overlay log 47→51. | `DISPCAPCNT` is approximated by live layers; flat BG VRAM view ignores bank remapping; title phase-2 shading not oracle-verified; battle/field coverage minimal |
+| M5 — Gameplay | early in progress | title → start menu → NEW GAME → gender/name entry → Juniper/Cheren/Bianca intro → first field map, all driven by LOTUS D-pad/touch. Save device and ARM7 sound clock work. | Walking/collision/camera, save/continue, battles, most menus/scripts, real audio output. Next known limitation: 4 of 15 `gWeatherTable` taskParams for other weather kinds remain raw; recorded below |
 | M6 — Widescreen | not started | | 400px, camera/culling, WideArt |
 | M7 — Optimization | not started | | hardware profiling, budgets |
 | M8 — Coverage | not started | | full regression corpus |
@@ -1011,9 +1011,9 @@ Nuvema Town at `mainloop` 20,045 and keeps advancing to 20,866 — **2,150 ticks
 past the old 18,716 stop** — with `overlay_log_count` 47→51, `pack_result=0`
 and `unimplemented_log_count=0`. The first field stop is closed.
 
-### Field stop 5 — cross-overlay data pointer in `gWeatherTable` (OPEN)
+### Field stop 5 — cross-overlay data pointer in `gWeatherTable` (FIXED, with a known tail)
 
-In the same new build the game halts later, at `mainloop` 20,866:
+In the build that fixed stop 4 the game halts later, at `mainloop` 20,866:
 
 - Core 0 stop: `exception 12`, `unmapped Read32 @ 0x021EE8F8`. A run of
   native_log reads precedes it: `0x021EE8C2` (u16), `0x021EE8E8`, `0x021EE8EC`,
@@ -1032,9 +1032,43 @@ In the same new build the game halts later, at `mainloop` 20,866:
   `ev=ptr` tables fixed above, so the `ev` rule does not apply.
 
 A blanket "rebase aligned `maybe` words into any other module's data window"
-rule would touch 35 words; sampling shows some are plausibly numeric constants
-(e.g. `0x20A0000`, `0x20A0004`), so it is **not** shipped. This needs a
-type-accurate way to identify `WeatherEntry.taskParam` as a pointer (source
-declaration, a named `WeatherKindDef` symbol, or Aletheia typed companions)
-before the generator can rebase it safely. Left open deliberately rather than
-shipping a value heuristic that could corrupt data.
+rule would touch 652 words (35 after alignment and excluding functions/named
+starts), with clear numeric constants among them, so it is **not** shipped.
+
+**Fix shipped.** `gen_flat_image.py` now collects `strong_objects` — every
+Aletheia object typed `struct` or `pointer_table` — and rebases a word in the
+`how != "ptr"` data branch when its value is aligned and lands inside one of
+those objects in another module. The target need not be the object's named
+start: the crash value `0x021EE8C0` sits 0x20 bytes into ov024's `g_021EE8A0`
+(`struct`, with seven `targets` listed). This is the object map's structural
+typing, not a numeric value scan.
+
+Counting the rule before shipping found **15** `maybe` words. The generator
+reports 44 `flat pointers into another module's struct`: tracing every hit
+showed 15 `maybe` plus 29 `holder` words. The gap is a measurement-script
+scope error, not a rule change — the generator's data branch runs for every
+`how != "ptr"` word whose function lookup fails, including the `holder` words
+that already use `resolve_function()` first. All 15 predicted addresses are in
+the 44; the 29 extras are in objects the map already marks as pointer holders
+(`struct`/`targets`/`ev=ptr`) and are cross-overlay data pointers too.
+
+Rebuilt 5,305,844 bytes, SHA-256
+`467457da26c43566d5ae2c7a7f4e6b308b83b8c8518ce8ae4bfdbf6f7c6e03fe`;
+`flat data pointers` 2,993 → 3,037, `function pointers` stays 7,216. LOTUS
+fresh secondary session, same input: the game now reaches `mainloop` 22,159
+and keeps advancing to 25,759 (+3,600 frames observed) with no stop,
+`overlay_log_count` steady at 51, `unimplemented_log_count=0`, `pack_result=0`.
+Direct guest-memory read confirms the mechanism: DS `0x021D8868` maps to host
+`0x00BA4868`, whose word is now `0x00BBA8C0` (the rebased flat address), not
+raw `0x021EE8C0`.
+
+**Known tail, not fixed.** 4 of the 15 `gWeatherTable` taskParams
+(`0x021D8870/8888/8890/88A8` → `0x021EF9E4/EF900/EF94C/EF998`) still hold raw
+DS values. Their targets are Aletheia `numeric`/`u32`/`ev=pool` objects
+(ov025's `g_021EF790` and small ov170 blocks) with no `targets` list, so the
+structural rule deliberately does not touch them. They are other weather
+kinds and have not been reached in LOTUS; a weather transition to one will
+fault and must be fixed with its own evidence (Aletheia declares
+`WeatherEntry.taskParam` as `struct WeatherKindDef *` in `ov021/weather.c:84`,
+but the object map does not encode that type). Left as a documented limitation
+rather than guessing.

@@ -462,6 +462,19 @@ def data_starts(data_map, rows):
 def build(modules, data_map, rows, functions, statics, native_spans, narrow):
     image = Image()
     named_data = data_starts(data_map, rows)
+    # A cross-overlay data pointer can target the interior of another module's
+    # struct, not a named start: gWeatherTable[].taskParam (ov021) points into
+    # ov024's WeatherKindDef at 0x021EE8C0. The exact named-start rule misses
+    # it and leaves a raw DS address the ARM11 process cannot read. A value
+    # inside a struct/pointer_table object is structural evidence of a pointer;
+    # only that shape is accepted, so numeric values landing in opaque blobs
+    # are still left alone.
+    strong_objects = []
+    for key, region in data_map.items():
+        for obj in region.get("objects", []):
+            if obj.get("kind") in ("struct", "pointer_table"):
+                start = int(obj["addr"], 16)
+                strong_objects.append((start, start + max(int(obj["size"]), 4)))
     windows_low = modules[0]["ram_start"]
     windows_high = max(module["bss_end"] for module in modules
                        if in_main_ram(module["ram_start"]))
@@ -543,6 +556,9 @@ def build(modules, data_map, rows, functions, statics, native_spans, narrow):
                 elif module["ram_start"] <= value < module["bss_end"]:
                     image.count("untyped words inside own module, not a named start (left)")
                     continue
+                elif value & 3 == 0 and any(start <= value < end
+                                           for start, end in strong_objects):
+                    image.count("flat pointers into another module's struct")
                 else:
                     continue
             static =(statics.get(module["key"], {}).get(value)
