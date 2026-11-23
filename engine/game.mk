@@ -188,9 +188,12 @@ $(PORT_IOREG_H): $(GAME)/sdk_ioreg.h tools/gen_port_ioreg_header.py
 
 # Sinjoh's geometry interpreter is game-agnostic DS hardware work and supplies
 # the NitroPort_Gx* hooks the game calls.
-# UNOWA keeps a local copy of the geometry interpreter: sinjoh's checkout is
-# pinned and must stay pristine, and Gen V needs its own matrix-state guard.
-$(OUT)/gen/kj_g3.o: engine/runtime/kj_g3.c
+# UNOWA keeps a local copy of the geometry interpreter so sinjoh's pinned
+# checkout stays pristine. Override KJ_G3_SRC on the make command line to test
+# the untouched upstream implementation:
+#   make -f engine/game.mk KJ_G3_SRC=$(SINJOH_DIR)/engine/runtime/kj_g3.c ...
+KJ_G3_SRC ?= engine/runtime/kj_g3.c
+$(OUT)/gen/kj_g3.o: $(KJ_G3_SRC)
 	@mkdir -p $(dir $@)
 	@$(DEVKITARM)/bin/arm-none-eabi-gcc $(PORT_CFLAGS) -DHGSS_PROFILE_OFF \
 	    -I$(SINJOH_DIR)/engine/runtime -I$(NITRO)/include \

@@ -140,12 +140,11 @@ static void clip_changed(void)
     ++s_clip_version;
 }
 
-/* UNOWA: Gen V's field display lists can leave the position matrix with all
- * three rotation rows zero (observed at G3BOX in Nuvema Town). The DS never
- * rasterises such a matrix; here it collapses s_clip to one row and every box
- * test culls, leaving a white screen. Record which writer did it and recover
- * to identity so geometry survives. The tag makes the real writer measurable
- * instead of guessed. */
+/* UNOWA diagnostic only: record which writer leaves the position matrix with
+ * all three rotation rows zero. This does not change game state — the actual
+ * field-stall fix is the gG3dBaseMtx43 alias in tools/gen_flat_image.py. An
+ * earlier build restored identity here; that was a debugging experiment and
+ * is intentionally not behaviour in the shipped path. */
 volatile uint32_t unowa_pos_wtag;
 volatile uint32_t unowa_pos_zero_count;
 volatile uint32_t unowa_no_cull;
@@ -160,8 +159,6 @@ static void unowa_pos_check(uint32_t tag)
     }
     if (rows == 0) {
         ++unowa_pos_zero_count;
-        mtx_identity(&s_pos);
-        clip_changed();
     }
 }
 

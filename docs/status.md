@@ -1237,7 +1237,24 @@ the LOTUS button-bit mapping (`0x20` = DS Down, `0x10` = Up, `0x40` = Left,
 now interactive. Walking/camera movement and the transition out of the
 bedroom to Nuvema Town remain unverified.
 
-Per UNOWA-4 issues 2 and 4, `unowa_pos_check()` and `unowa_no_cull` are
-instrumentation in a build-tree copy of sinjoh's engine; the guard's
-behavioural effect is to be removed once this fix is accepted, and the
-default build keeps culling enabled.
+LOTUS `input_state` uses a gamepad bit layout, not the 3DS HID layout.
+Measured by holding one bit at a time and reading `NitroPort_IoReg + 0x130`
+in the field: `0x001`=A, `0x002`=B, `0x010`=DS Up, `0x020`=DS Down,
+`0x040`=DS Left, `0x080`=DS Right, `0x400`=DS Start, `0x800`=DS Select;
+`0x004`/`0x008` produced no DS button. Earlier replay notes that used
+`0x080` for "Down" were actually pressing Right. Dialogue advances only
+after the typewriter finishes: a 3-frame press followed by ~120 frames of
+release completes a line, then the next press moves to the next line.
+Faster taps left the text partially typed. Record this mapping before
+building the deterministic replay UNOWA-4 issue 5 asks for.
+
+Per UNOWA-4 issues 2 and 4, `unowa_pos_check()` is now diagnostic-only: it
+records the last writer and counts degenerate matrices but does not change
+game state, and `unowa_no_cull` defaults to 0. Both live in a build-tree copy
+of sinjoh's engine so the pinned checkout stays untouched; `KJ_G3_SRC` on
+the make command line builds the original sinjoh implementation for
+comparison. Rebuilt 5,440,436 bytes, SHA-256
+`883327620fd6f5cfc782c3098a810f8b447ad9ec7732c79c98ead6fbbecb8dff`; a
+fresh LOTUS session on that binary again reached `g3_verts` 973 /
+`g3_batches` 26 at `mainloop` 9,332 with culling enabled and the bedroom
+visible.
